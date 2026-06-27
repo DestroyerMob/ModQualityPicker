@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "balanced",
+  "displayName": "Balanced",
+  "description": "Default pack experience with the normal content set and moderate client-side features.",
+  "mods": {
+    "sodium": {
+      "enabled": true,
+      "locked": true,
+      "reason": "Core performance renderer for this pack."
+    },
+    "particular": {
+      "enabled": false,
+      "locked": false,
+      "reason": "Optional particle flourish for stronger machines."
+    }
+  },
+  "configFiles": [
+    {
+      "path": "config/example-client.toml",
+      "mode": "REPLACE_FILE",
+      "presetFile": "presets/balanced/config/example-client.toml",
+      "sha256": ""
+    }
+  ],
+  "options": {
+    "particleDensity": {
+      "label": "Particle Density",
+      "value": "medium",
+      "locked": false,
+      "description": "Example option for UI and config-export development."
+    }
+  }
+}
+
