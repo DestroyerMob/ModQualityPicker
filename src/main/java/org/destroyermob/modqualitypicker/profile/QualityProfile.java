@@ -11,6 +11,7 @@ public record QualityProfile(
         int schemaVersion,
         String id,
         String displayName,
+        int sortOrder,
         String description,
         Map<String, ModState> mods,
         List<ConfigFileOverride> configFiles,
@@ -22,6 +23,7 @@ public record QualityProfile(
         schemaVersion = schemaVersion <= 0 ? SCHEMA_VERSION : schemaVersion;
         id = normalizeId(id);
         displayName = displayName == null || displayName.isBlank() ? id : displayName;
+        sortOrder = Math.max(0, sortOrder);
         description = Objects.requireNonNullElse(description, "");
         mods = immutableMap(mods);
         configFiles = immutableList(configFiles);
@@ -29,7 +31,11 @@ public record QualityProfile(
     }
 
     public static QualityProfile empty(String id, String displayName) {
-        return new QualityProfile(SCHEMA_VERSION, id, displayName, "", Map.of(), List.of(), Map.of());
+        return new QualityProfile(SCHEMA_VERSION, id, displayName, 0, "", Map.of(), List.of(), Map.of());
+    }
+
+    public QualityProfile withSortOrder(int sortOrder) {
+        return new QualityProfile(schemaVersion, id, displayName, sortOrder, description, mods, configFiles, options);
     }
 
     private static String normalizeId(String id) {
@@ -53,4 +59,3 @@ public record QualityProfile(
         return Collections.unmodifiableList(new ArrayList<>(source));
     }
 }
-

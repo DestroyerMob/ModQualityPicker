@@ -39,6 +39,14 @@ public final class ProfileStore {
         write(path, selection);
     }
 
+    public Optional<PendingProfileChange> readPendingProfile(Path path) throws IOException {
+        return read(path, PendingProfileChange.class);
+    }
+
+    public void writePendingProfile(Path path, PendingProfileChange change) throws IOException {
+        write(path, change);
+    }
+
     private <T> Optional<T> read(Path path, Class<T> type) throws IOException {
         if (!Files.exists(path)) {
             return Optional.empty();
@@ -61,4 +69,3 @@ public final class ProfileStore {
         }
     }
 }
-

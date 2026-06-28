@@ -24,6 +24,18 @@ sourceSets.main.resources {
     exclude '**/.cache/**'
 }
 
+repositories {
+    maven {
+        name = 'Fabric'
+        url = 'https://maven.fabricmc.net/'
+    }
+}
+
+dependencies {
+    annotationProcessor "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
+    compileOnly "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
+}
+
 neoForge {
     version = project.neo_version
 
@@ -120,6 +132,115 @@ publishing {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 21
+    options.compilerArgs += [
+            "-AoutRefMapFile=${layout.buildDirectory.file("tmp/compileJava/${mod_id}.refmap.json").get().asFile}",
+            "-AmappingTypes=tsrg",
+            "-AreobfTsrgFile=${layout.buildDirectory.file("tmp/mixin/inverted.tsrg").get().asFile}",
+            "-AoutTsrgFile=${layout.buildDirectory.file("tmp/compileJava/${mod_id}.tsrg").get().asFile}"
+    ]
+    dependsOn "invertNeoFormTsrg"
+}
+
+def mixinRefmapFile = layout.buildDirectory.file("tmp/compileJava/${mod_id}.refmap.json").get().asFile
+
+def normalizeMixinRefmap = tasks.register("normalizeMixinRefmap") {
+    dependsOn tasks.named("compileJava")
+    outputs.upToDateWhen { false }
+
+    doLast {
+        def refmapFile = mixinRefmapFile
+        if (!refmapFile.exists()) {
+            refmapFile.parentFile.mkdirs()
+        }
+
+        def refmap = [
+                mappings: [:],
+                data    : [
+                        searge: [:]
+                ]
+        ]
+        refmapFile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(refmap)) + System.lineSeparator()
+    }
+}
+
+def neoFormTsrgInputs = fileTree("${gradle.gradleUserHomeDir}/caches/neoformruntime/intermediate_results") {
+    include "*_output.tsrg"
+}
+
+tasks.register("invertNeoFormTsrg") {
+    def outputFile = layout.buildDirectory.file("tmp/mixin/inverted.tsrg")
+    inputs.files(neoFormTsrgInputs)
+    outputs.file(outputFile)
+
+    doLast {
+        def tsrgFiles = inputs.files.files
+        if (tsrgFiles.isEmpty()) {
+            throw new GradleException("No NeoForm TSrg mapping file found. Run createMinecraftArtifacts before compiling mixins.")
+        }
+
+        def inputFile = tsrgFiles.max { it.lastModified() }
+        def classMap = [:]
+        def lines = inputFile.readLines("UTF-8")
+
+        lines.each { line ->
+            if (!line || line.startsWith("#") || line.startsWith("tsrg2") || line.startsWith("\t")) {
+                return
+            }
+
+            def parts = line.split(" ")
+            if (parts.length == 2 && !parts[0].endsWith("/") && !parts[1].endsWith("/")) {
+                classMap[parts[0]] = parts[1]
+            }
+        }
+
+        def remapDescriptor = { String descriptor ->
+            descriptor.replaceAll(/L([^;]+);/) { all, className ->
+                "L${classMap[className] ?: className};"
+            }
+        }
+
+        outputFile.get().asFile.parentFile.mkdirs()
+        outputFile.get().asFile.withWriter("UTF-8") { writer ->
+            writer.writeLine("tsrg2 left right")
+
+            String obfuscatedClass = null
+            String namedClass = null
+
+            lines.each { line ->
+                if (!line || line.startsWith("#") || line.startsWith("tsrg2") || line.startsWith("\t\t")) {
+                    return
+                }
+
+                def parts = line.split(" ")
+                if (!line.startsWith("\t")) {
+                    if (parts.length == 2 && !parts[0].endsWith("/") && !parts[1].endsWith("/")) {
+                        obfuscatedClass = parts[0]
+                        namedClass = parts[1]
+                        writer.writeLine("${namedClass} ${obfuscatedClass}")
+                    }
+                    return
+                }
+
+                if (obfuscatedClass == null || namedClass == null) {
+                    return
+                }
+
+                parts[0] = parts[0].substring(1)
+                if (parts.length == 2) {
+                    writer.writeLine("\t${parts[1]} ${parts[0]}")
+                } else if (parts.length == 3) {
+                    writer.writeLine("\t${parts[2]} ${remapDescriptor(parts[1])} ${parts[0]}")
+                }
+            }
+        }
+    }
+}
+
+tasks.named("jar", Jar).configure {
+    dependsOn normalizeMixinRefmap
+    from(layout.buildDirectory.file("tmp/compileJava/${mod_id}.refmap.json")) {
+        into ""
+    }
 }
 
 idea {
@@ -128,4 +249,3 @@ idea {
         downloadJavadoc = true
     }
 }
-

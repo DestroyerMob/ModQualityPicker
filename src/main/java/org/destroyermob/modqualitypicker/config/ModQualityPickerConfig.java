@@ -17,6 +17,18 @@ public final class ModQualityPickerConfig {
             .comment("Writes the currently loaded mod snapshot to config/modqualitypicker/active-selection.json after startup.")
             .define("writeLaunchSnapshot", true);
 
+    public static final ModConfigSpec.BooleanValue ENABLE_WORLD_LOAD_PROMPT = BUILDER
+            .comment("Checks a world's saved quality profile before the world is opened.")
+            .define("enableWorldLoadPrompt", true);
+
+    public static final ModConfigSpec.BooleanValue EXIT_AFTER_QUEUING_WORLD_PROFILE = BUILDER
+            .comment("Exits Minecraft after queuing a world's profile so the launcher can restart with the requested mod set.")
+            .define("exitAfterQueuingWorldProfile", false);
+
+    public static final ModConfigSpec.ConfigValue<String> PACK_EXPORT_ROOT = BUILDER
+            .comment("Preset export destination relative to the game directory. For this Prism workspace, ../pack/config/modqualitypicker points at the pack root.")
+            .define("packExportRoot", "../pack/config/modqualitypicker");
+
     public static final ModConfigSpec.EnumValue<WorldMismatchPolicy> WORLD_MISMATCH_POLICY = BUILDER
             .comment("How the world-open flow should react when the world profile does not match the current launch.")
             .defineEnum("worldMismatchPolicy", WorldMismatchPolicy.PROMPT);
@@ -36,4 +48,3 @@ public final class ModQualityPickerConfig {
         REQUIRE_WORLD_PROFILE
     }
 }
-

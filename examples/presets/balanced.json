@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "id": "balanced",
   "displayName": "Balanced",
+  "sortOrder": 20,
   "description": "Default pack experience with the normal content set and moderate client-side features.",
   "mods": {
     "sodium": {
@@ -32,4 +33,3 @@
     }
   }
 }
-

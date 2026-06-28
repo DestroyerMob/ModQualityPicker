@@ -1,0 +1,14 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "org.destroyermob.modqualitypicker.mixin",
+  "refmap": "modqualitypicker.refmap.json",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "OptionsScreenMixin",
+    "WorldListEntryMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
