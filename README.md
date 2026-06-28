@@ -96,4 +96,20 @@ python3 tools/modqualitypicker_prism.py export-presets --instance-root /path/to/
 
 ## Current Status
 
-The full first feature loop is in place. The remaining hardening work is UX polish, broader TOML support, profile dependency validation, and launcher integration that can automatically run the Prism helper before startup.
+The full first feature loop is in place for Prism-based pack testing. The current branch can capture profiles, edit per-profile mod state, queue profile changes, prompt on world/profile mismatches, apply queued changes with the Prism helper, and export presets back into a pack.
+
+## Supported Versions
+
+- Minecraft 1.21.1
+- NeoForge 21.1.234
+- Java 21
+
+## Configuration
+
+The common config tracks the active profile, whether launch snapshots are written, whether world-open prompts are enabled, the world mismatch policy, and the preset export path.
+
+## Known Limitations
+
+- Runtime mod unloading is intentionally out of scope; mod enable/disable changes require restart and launcher/pre-launch helper support.
+- TOML merging is intentionally simple and still needs more edge-case hardening.
+- Profile dependency validation and a fully automatic Prism launch integration are still future work.
