@@ -81,6 +81,9 @@ public final class WorldProfileMismatchScreen extends Screen {
         if (!this.diff.loadedDisabledMods().isEmpty()) {
             this.lines.add(Component.translatable("modqualitypicker.world.diff.disabled_loaded", String.join(", ", this.diff.loadedDisabledMods())));
         }
+        if (!this.diff.newlyLoadedMods().isEmpty()) {
+            this.lines.add(Component.translatable("modqualitypicker.world.diff.newly_loaded", String.join(", ", this.diff.newlyLoadedMods())));
+        }
         if (!this.diff.configHashMismatches().isEmpty()) {
             this.lines.add(Component.translatable("modqualitypicker.world.diff.configs", String.join(", ", this.diff.configHashMismatches())));
         }

@@ -12,11 +12,13 @@ public record ProfileDiff(
         boolean activeProfileMismatch,
         Set<String> missingEnabledMods,
         Set<String> loadedDisabledMods,
+        Set<String> newlyLoadedMods,
         Set<String> configHashMismatches
 ) {
     public ProfileDiff {
         missingEnabledMods = immutableSet(missingEnabledMods);
         loadedDisabledMods = immutableSet(loadedDisabledMods);
+        newlyLoadedMods = immutableSet(newlyLoadedMods);
         configHashMismatches = immutableSet(configHashMismatches);
     }
 
@@ -24,6 +26,7 @@ public record ProfileDiff(
         return activeProfileMismatch
                 || !missingEnabledMods.isEmpty()
                 || !loadedDisabledMods.isEmpty()
+                || !newlyLoadedMods.isEmpty()
                 || !configHashMismatches.isEmpty();
     }
 
@@ -34,6 +37,7 @@ public record ProfileDiff(
         boolean profileMismatch = !worldProfile.id().equals(currentSelection.activeProfileId());
         Set<String> missingEnabled = new TreeSet<>();
         Set<String> loadedDisabled = new TreeSet<>();
+        Set<String> newlyLoaded = new TreeSet<>();
         Set<String> configMismatches = new TreeSet<>();
 
         worldProfile.mods().forEach((modId, desiredState) -> {
@@ -43,6 +47,12 @@ public record ProfileDiff(
             }
             if (!desiredState.enabled() && currentlyLoaded) {
                 loadedDisabled.add(modId);
+            }
+        });
+
+        currentSelection.enabledMods().forEach((modId, currentlyLoaded) -> {
+            if (currentlyLoaded && !worldProfile.mods().containsKey(modId)) {
+                newlyLoaded.add(modId);
             }
         });
 
@@ -56,7 +66,7 @@ public record ProfileDiff(
             }
         }
 
-        return new ProfileDiff(profileMismatch, missingEnabled, loadedDisabled, configMismatches);
+        return new ProfileDiff(profileMismatch, missingEnabled, loadedDisabled, newlyLoaded, configMismatches);
     }
 
     private static Set<String> immutableSet(Set<String> source) {
@@ -66,4 +76,3 @@ public record ProfileDiff(
         return Collections.unmodifiableSet(new LinkedHashSet<>(source));
     }
 }
-

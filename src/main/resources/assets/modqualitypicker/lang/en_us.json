@@ -66,6 +66,7 @@
   "modqualitypicker.world.diff.configs": "Config differences: %s",
   "modqualitypicker.world.diff.disabled_loaded": "Loaded but disabled by world: %s",
   "modqualitypicker.world.diff.missing": "Missing required by world: %s",
+  "modqualitypicker.world.diff.newly_loaded": "Newly loaded mods/blocks for this world: %s",
   "modqualitypicker.world.diff.profile": "World profile: %s",
   "modqualitypicker.world.error": "Quality Profile Error",
   "modqualitypicker.world.queued.body": "The world profile has been queued. Restart the instance to load the requested mod and config set.",
