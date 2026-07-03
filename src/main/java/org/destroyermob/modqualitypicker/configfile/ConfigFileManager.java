@@ -1,16 +1,23 @@
 package org.destroyermob.modqualitypicker.configfile;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonParseException;
+import org.destroyermob.modqualitypicker.ModQualityPicker;
 import org.destroyermob.modqualitypicker.profile.ConfigFileOverride;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
 import org.destroyermob.modqualitypicker.runtime.ProfilePaths;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Reader;
+import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -24,8 +31,27 @@ import java.util.stream.Stream;
 public final class ConfigFileManager {
     private static final Pattern SECTION = Pattern.compile("^\\s*\\[([^\\[\\]]+)]\\s*(?:#.*)?$");
     private static final Pattern KEY_VALUE = Pattern.compile("^\\s*([A-Za-z0-9_.-]+)\\s*=\\s*(.+)$");
+    private static final String DEFAULTS_ROOT = "defaults";
+    private static final String DEFAULTS_MANIFEST = "defaults-manifest.json";
+    private static final String DIFF_EXTENSION = ".diff";
+    private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
 
     private ConfigFileManager() {
+    }
+
+    public static void captureMissingDefaultConfigFiles(Path gameDirectory) throws IOException {
+        ConfigBaselineManifest manifest = readDefaultManifest();
+        Map<String, ConfigBaselineEntry> entries = new LinkedHashMap<>(manifest.entries());
+        boolean changed = false;
+        for (String relativePath : listConfigFiles(gameDirectory)) {
+            Path baseline = captureDefaultConfigFileIfMissing(gameDirectory, relativePath);
+            if (baseline != null && Files.isRegularFile(baseline)) {
+                changed = updateDefaultManifestEntry(entries, relativePath, baseline) || changed;
+            }
+        }
+        if (changed) {
+            writeDefaultManifest(manifest.withEntries(entries));
+        }
     }
 
     public static Map<String, String> hashConfigFiles(Path gameDirectory, QualityProfile profile) {
@@ -57,19 +83,24 @@ public final class ConfigFileManager {
             }
 
             Path target = resolveInside(gameDirectory, configFile.path());
-            Path preset = resolvePreset(configFile);
-            if (!Files.isRegularFile(preset)) {
-                continue;
-            }
-
             Path parent = target.getParent();
             if (parent != null) {
                 Files.createDirectories(parent);
             }
 
-            if (configFile.mode() == ConfigFileOverride.ConfigApplyMode.MERGE_TOML) {
+            if (configFile.mode() == ConfigFileOverride.ConfigApplyMode.APPLY_DIFF) {
+                applyDiffConfigFile(target, configFile);
+            } else if (configFile.mode() == ConfigFileOverride.ConfigApplyMode.MERGE_TOML) {
+                Path preset = resolvePreset(configFile);
+                if (!Files.isRegularFile(preset)) {
+                    continue;
+                }
                 mergeTomlOverlay(target, preset);
             } else {
+                Path preset = resolvePreset(configFile);
+                if (!Files.isRegularFile(preset)) {
+                    continue;
+                }
                 Files.copy(preset, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
             }
         }
@@ -84,6 +115,7 @@ public final class ConfigFileManager {
         try (Stream<Path> paths = Files.walk(configRoot)) {
             return paths
                     .filter(Files::isRegularFile)
+                    .filter(path -> !isManagedConfigFile(configRoot, path))
                     .filter(ConfigFileManager::isSupportedConfigFile)
                     .map(path -> gameDirectory.relativize(path).toString().replace('\\', '/'))
                     .sorted(Comparator.naturalOrder())
@@ -104,14 +136,21 @@ public final class ConfigFileManager {
             throw new IOException("Config file does not exist: " + relativePath);
         }
 
-        String presetFile = "presets/" + profile.id() + "/" + relativePath;
+        Path baseline = captureDefaultConfigFileIfMissing(gameDirectory, relativePath);
+        if (baseline == null || !Files.isRegularFile(baseline)) {
+            throw new IOException("Missing default config baseline: " + relativePath);
+        }
+        updateDefaultManifest(relativePath, baseline);
+
+        String presetFile = "presets/" + profile.id() + "/" + relativePath + DIFF_EXTENSION;
         Path destination = resolveInside(ProfilePaths.instanceRoot(), presetFile);
         Path parent = destination.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
-        return new ConfigFileOverride(relativePath, mode, presetFile, sha256(source));
+        List<String> diff = UnifiedConfigDiff.create(relativePath, Files.readAllLines(baseline), Files.readAllLines(source));
+        Files.write(destination, diff);
+        return new ConfigFileOverride(relativePath, ConfigFileOverride.ConfigApplyMode.APPLY_DIFF, presetFile, sha256(source));
     }
 
     public static String sha256(Path path) throws IOException {
@@ -156,6 +195,97 @@ public final class ConfigFileManager {
         return resolveInside(ProfilePaths.instanceRoot(), presetFile);
     }
 
+    private static Path resolveDefault(String relativePath) {
+        return resolveInside(ProfilePaths.instanceRoot(), DEFAULTS_ROOT + "/" + relativePath);
+    }
+
+    private static Path captureDefaultConfigFileIfMissing(Path gameDirectory, String relativePath) throws IOException {
+        Path baseline = resolveDefault(relativePath);
+        if (Files.isRegularFile(baseline)) {
+            return baseline;
+        }
+
+        Path source = resolveInside(gameDirectory, relativePath);
+        if (!Files.isRegularFile(source)) {
+            return null;
+        }
+
+        Path parent = baseline.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        Files.copy(source, baseline, StandardCopyOption.COPY_ATTRIBUTES);
+        return baseline;
+    }
+
+    private static ConfigBaselineManifest readDefaultManifest() throws IOException {
+        Path manifest = ProfilePaths.instanceRoot().resolve(DEFAULTS_MANIFEST);
+        if (!Files.isRegularFile(manifest)) {
+            return ConfigBaselineManifest.empty();
+        }
+        try (Reader reader = Files.newBufferedReader(manifest)) {
+            ConfigBaselineManifest parsed = GSON.fromJson(reader, ConfigBaselineManifest.class);
+            return parsed == null ? ConfigBaselineManifest.empty() : parsed;
+        } catch (JsonParseException exception) {
+            throw new IOException("Invalid default config manifest: " + manifest, exception);
+        }
+    }
+
+    private static void writeDefaultManifest(ConfigBaselineManifest manifest) throws IOException {
+        Path path = ProfilePaths.instanceRoot().resolve(DEFAULTS_MANIFEST);
+        Path parent = path.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        try (Writer writer = Files.newBufferedWriter(path)) {
+            GSON.toJson(manifest, writer);
+            writer.write(System.lineSeparator());
+        }
+    }
+
+    private static void updateDefaultManifest(String relativePath, Path baseline) throws IOException {
+        ConfigBaselineManifest manifest = readDefaultManifest();
+        Map<String, ConfigBaselineEntry> entries = new LinkedHashMap<>(manifest.entries());
+        if (updateDefaultManifestEntry(entries, relativePath, baseline)) {
+            writeDefaultManifest(manifest.withEntries(entries));
+        }
+    }
+
+    private static boolean updateDefaultManifestEntry(Map<String, ConfigBaselineEntry> entries, String relativePath, Path baseline) throws IOException {
+        ConfigBaselineEntry previous = entries.get(relativePath);
+        String hash = sha256(baseline);
+        long size = Files.size(baseline);
+        String capturedAt = previous != null && previous.sha256().equals(hash) && previous.size() == size
+                ? previous.capturedAt()
+                : Instant.now().toString();
+        ConfigBaselineEntry next = new ConfigBaselineEntry(relativePath, ownerHint(relativePath), hash, size, capturedAt);
+        if (next.equals(previous)) {
+            return false;
+        }
+        entries.put(relativePath, next);
+        return true;
+    }
+
+    private static String ownerHint(String relativePath) {
+        String path = relativePath.startsWith("config/") ? relativePath.substring("config/".length()) : relativePath;
+        int slash = path.indexOf('/');
+        String first = slash >= 0 ? path.substring(0, slash) : path;
+        int dot = first.lastIndexOf('.');
+        return dot > 0 ? first.substring(0, dot) : first;
+    }
+
+    private static void applyDiffConfigFile(Path target, ConfigFileOverride configFile) throws IOException {
+        Path baseline = resolveDefault(configFile.path());
+        if (!Files.isRegularFile(baseline)) {
+            throw new IOException("Missing default config baseline: " + configFile.path());
+        }
+
+        List<String> baseLines = Files.readAllLines(baseline);
+        Path diff = resolvePreset(configFile);
+        List<String> diffLines = Files.isRegularFile(diff) ? Files.readAllLines(diff) : List.of();
+        Files.write(target, UnifiedConfigDiff.apply(baseLines, diffLines));
+    }
+
     private static boolean isSupportedConfigFile(Path path) {
         String fileName = path.getFileName().toString().toLowerCase(Locale.ROOT);
         return fileName.endsWith(".toml")
@@ -168,6 +298,11 @@ public final class ConfigFileManager {
                 || fileName.endsWith(".yml")
                 || fileName.endsWith(".ini")
                 || fileName.endsWith(".txt");
+    }
+
+    private static boolean isManagedConfigFile(Path configRoot, Path path) {
+        String relative = configRoot.relativize(path).toString().replace('\\', '/');
+        return relative.equals(ModQualityPicker.MOD_ID) || relative.startsWith(ModQualityPicker.MOD_ID + "/");
     }
 
     private static void mergeTomlOverlay(Path target, Path overlay) throws IOException {

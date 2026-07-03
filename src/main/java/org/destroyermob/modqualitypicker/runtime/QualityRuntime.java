@@ -30,6 +30,7 @@ public final class QualityRuntime {
         try {
             Files.createDirectories(ProfilePaths.instanceRoot());
             Files.createDirectories(ProfilePaths.presetsRoot());
+            ConfigFileManager.captureMissingDefaultConfigFiles(ProfilePaths.gameDirectory());
 
             if (ModQualityPickerConfig.WRITE_LAUNCH_SNAPSHOT.get()) {
                 RuntimeSelection selection = currentSelection();

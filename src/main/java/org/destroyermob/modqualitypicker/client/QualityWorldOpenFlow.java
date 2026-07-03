@@ -74,6 +74,24 @@ public final class QualityWorldOpenFlow {
         }
     }
 
+    static void acceptCurrentProfile(Screen returnScreen, WorldSelectionList.WorldListEntry entry, Path worldDirectory) {
+        Minecraft minecraft = Minecraft.getInstance();
+        try {
+            RuntimeSelection currentSelection = QualityRuntime.currentSelection();
+            QualityProfile currentProfile = QualityRuntime.captureCurrentProfile(currentSelection.activeProfileId(), currentSelection.activeProfileId());
+            QualityRuntime.writeWorldProfile(worldDirectory, currentProfile);
+        } catch (IOException | RuntimeException exception) {
+            minecraft.setScreen(new AlertScreen(
+                    () -> minecraft.setScreen(returnScreen),
+                    Component.translatable("modqualitypicker.world.error"),
+                    Component.literal(exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage())
+            ));
+            return;
+        }
+
+        openVanilla(entry);
+    }
+
     static void queueWorldProfile(Screen returnScreen, QualityProfile profile, String worldId) {
         Minecraft minecraft = Minecraft.getInstance();
         try {
@@ -108,7 +126,8 @@ public final class QualityWorldOpenFlow {
             ProfileDiff diff
     ) {
         if (ModQualityPickerConfig.WORLD_MISMATCH_POLICY.get() == ModQualityPickerConfig.WorldMismatchPolicy.ALLOW_CURRENT) {
-            return false;
+            acceptCurrentProfile(screen, entry, worldDirectory);
+            return true;
         }
 
         if (ModQualityPickerConfig.WORLD_MISMATCH_POLICY.get() == ModQualityPickerConfig.WorldMismatchPolicy.REQUIRE_WORLD_PROFILE) {
@@ -120,4 +139,3 @@ public final class QualityWorldOpenFlow {
         return true;
     }
 }
-

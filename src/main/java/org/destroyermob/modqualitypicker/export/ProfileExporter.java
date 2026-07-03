@@ -13,9 +13,13 @@ public final class ProfileExporter {
     }
 
     public static Path exportPresets(Path destinationRoot) throws IOException {
-        Path destination = destinationRoot.resolve("presets");
-        copyTree(ProfilePaths.presetsRoot(), destination);
-        return destination;
+        copyTree(ProfilePaths.defaultsRoot(), destinationRoot.resolve("defaults"));
+        copyTree(ProfilePaths.presetsRoot(), destinationRoot.resolve("presets"));
+        if (Files.isRegularFile(ProfilePaths.defaultsManifest())) {
+            Files.createDirectories(destinationRoot);
+            Files.copy(ProfilePaths.defaultsManifest(), destinationRoot.resolve("defaults-manifest.json"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        }
+        return destinationRoot;
     }
 
     private static void copyTree(Path source, Path destination) throws IOException {
@@ -41,4 +45,3 @@ public final class ProfileExporter {
         }
     }
 }
-

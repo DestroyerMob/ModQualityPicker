@@ -16,9 +16,9 @@ public record ConfigFileOverride(
     }
 
     public enum ConfigApplyMode {
+        APPLY_DIFF,
         REPLACE_FILE,
         MERGE_TOML,
         KEEP_PLAYER
     }
 }
-

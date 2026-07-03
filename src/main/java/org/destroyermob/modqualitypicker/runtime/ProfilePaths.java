@@ -22,6 +22,14 @@ public final class ProfilePaths {
         return instanceRoot().resolve("presets");
     }
 
+    public static Path defaultsRoot() {
+        return instanceRoot().resolve("defaults");
+    }
+
+    public static Path defaultsManifest() {
+        return instanceRoot().resolve("defaults-manifest.json");
+    }
+
     public static Path preset(String profileId) {
         String fileName = profileId.replaceAll("[^a-z0-9_.-]", "_") + ".json";
         return presetsRoot().resolve(fileName);

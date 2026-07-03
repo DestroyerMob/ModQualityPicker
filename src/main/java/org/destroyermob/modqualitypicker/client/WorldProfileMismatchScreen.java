@@ -44,7 +44,7 @@ public final class WorldProfileMismatchScreen extends Screen {
     protected void init() {
         int center = this.width / 2;
         int y = Math.max(118, this.height / 2 + 20);
-        this.addRenderableWidget(Button.builder(Component.translatable("modqualitypicker.world.continue_current"), button -> QualityWorldOpenFlow.openVanilla(this.entry))
+        this.addRenderableWidget(Button.builder(Component.translatable("modqualitypicker.world.continue_current"), button -> QualityWorldOpenFlow.acceptCurrentProfile(this.parent, this.entry, this.worldDirectory))
                 .bounds(center - 154, y, 150, 20)
                 .build());
         this.addRenderableWidget(Button.builder(Component.translatable("modqualitypicker.world.use_world"), button -> QualityWorldOpenFlow.queueWorldProfile(this.parent, this.worldProfile, this.summary.getLevelId()))
@@ -92,4 +92,3 @@ public final class WorldProfileMismatchScreen extends Screen {
         }
     }
 }
-

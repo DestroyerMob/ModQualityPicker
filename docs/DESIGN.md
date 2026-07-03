@@ -7,7 +7,11 @@ Mod Quality Picker is a pack-developer tool for shipping multiple performance an
 - A quality profile is a named preset with an explicit `sortOrder`, mod states, config file rules, and exposed player options.
 - The current launch writes `config/modqualitypicker/active-selection.json`.
 - Pending changes are written to `config/modqualitypicker/pending-selection.json` for the launcher/pre-launch applier to consume.
+- Generated config defaults live under `config/modqualitypicker/defaults`.
+- Default metadata lives in `config/modqualitypicker/defaults-manifest.json`.
+- Presets store config changes as unified diffs under `config/modqualitypicker/presets/<profile>/...`.
 - Each world stores its desired profile at `<world>/modqualitypicker/quality-profile.json`.
+- Optional world-specific config changes live under `<world>/modqualitypicker/config-diffs`.
 - When a player opens a world, a client-side mixin compares the world profile to the active launch snapshot before vanilla continues.
 
 ## World Open Choices
@@ -29,7 +33,7 @@ Pack developers can open the Mod Quality Picker screen from the mod list/config 
 - `Profiles` handles profile switching, saving, capture, queueing, and exporting.
 - `Mods` shows a scrollable list of loaded mod ids and handles enabled/disabled state, locked state, and override removal.
 
-Config-file rules remain in the data model and launcher helper, but their in-game editor controls are hidden until that workflow is clearer.
+Config-file rules remain in the data model and launcher helper, but their in-game editor controls are hidden until that workflow is clearer. Live config files are treated as disposable output: the helper rebuilds them from the captured defaults, then the selected profile's diff, then any world-specific diff before launch.
 
 Profile order is stored in `sortOrder`. The Profiles tab can move presets up or down, rewriting the order values that the player-facing cycle button uses.
 
@@ -37,13 +41,14 @@ Profile order is stored in `sortOrder`. The Profiles tab can move presets up or 
 
 - Client profile editor screen.
 - World-list mismatch prompt.
-- Config file hashing and TOML merge support.
+- Config file hashing, default manifest validation, legacy TOML merge support, and default-plus-diff config application.
 - Pre-launch applier for Prism Launcher instances.
-- Pack export command that copies presets into the pack root.
+- Pack export command that copies defaults and presets into the pack root.
+- Helper smoke tests for default capture and preset/world diff layering.
 
 ## Next Hardening Pass
 
-- Replace the simple TOML key overlay with a full TOML AST merge if nested arrays become important.
+- Add a clean throwaway-launch workflow for refreshing default baselines when mods update their generated config format.
 - Add a dependency validator so profiles cannot disable a required library while leaving dependents enabled.
 - Add richer option widgets for arbitrary pack-defined profile settings.
 - Add launcher documentation for running the Prism helper automatically before instance launch.

@@ -375,9 +375,10 @@ public final class QualityProfileScreen extends Screen {
         selectedConfig().ifPresent(config -> {
             ConfigFileOverride existing = configOverride(config).orElse(new ConfigFileOverride(config, defaultMode(config), "", ""));
             ConfigFileOverride.ConfigApplyMode next = switch (existing.mode()) {
-                case REPLACE_FILE -> ConfigFileOverride.ConfigApplyMode.MERGE_TOML;
-                case MERGE_TOML -> ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER;
+                case APPLY_DIFF -> ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER;
                 case KEEP_PLAYER -> ConfigFileOverride.ConfigApplyMode.REPLACE_FILE;
+                case REPLACE_FILE -> ConfigFileOverride.ConfigApplyMode.MERGE_TOML;
+                case MERGE_TOML -> ConfigFileOverride.ConfigApplyMode.APPLY_DIFF;
             };
             putConfig(new ConfigFileOverride(config, next, existing.presetFile(), existing.sha256()));
         });
@@ -438,7 +439,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private ConfigFileOverride.ConfigApplyMode defaultMode(String config) {
-        return config.endsWith(".toml") ? ConfigFileOverride.ConfigApplyMode.MERGE_TOML : ConfigFileOverride.ConfigApplyMode.REPLACE_FILE;
+        return ConfigFileOverride.ConfigApplyMode.APPLY_DIFF;
     }
 
     private QualityProfile copyProfile(String id, String displayName, Map<String, ModState> mods, List<ConfigFileOverride> configs, Map<String, ProfileOption> options) {
