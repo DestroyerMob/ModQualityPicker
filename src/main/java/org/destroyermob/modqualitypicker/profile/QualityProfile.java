@@ -38,6 +38,10 @@ public record QualityProfile(
         return new QualityProfile(schemaVersion, id, displayName, sortOrder, description, mods, configFiles, options);
     }
 
+    public QualityProfile withDisplayName(String displayName) {
+        return new QualityProfile(schemaVersion, id, displayName, sortOrder, description, mods, configFiles, options);
+    }
+
     private static String normalizeId(String id) {
         if (id == null || id.isBlank()) {
             return "unnamed";

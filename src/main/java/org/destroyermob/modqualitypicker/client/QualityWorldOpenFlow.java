@@ -48,7 +48,7 @@ public final class QualityWorldOpenFlow {
                 return false;
             }
 
-            QualityProfile targetProfile = QualityRuntime.profileForWorldSelection(worldProfile.get());
+            QualityProfile targetProfile = worldProfile.get();
             ProfileDiff diff = ProfileDiff.compare(targetProfile, currentSelection);
             if (!diff.hasDifferences()) {
                 return false;

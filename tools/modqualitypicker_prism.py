@@ -112,7 +112,7 @@ class ModJar:
 def load_pending_profile(paths: InstancePaths) -> dict | None:
     if not paths.pending_profile.exists():
         return None
-    return json.loads(paths.pending_profile.read_text(encoding="utf-8"))
+    return json.loads(paths.pending_profile.read_text(encoding="utf-8-sig"))
 
 
 def profile_from_pending(pending: dict) -> dict:
@@ -140,7 +140,7 @@ def active_profile_id(paths: InstancePaths) -> str:
     if not config_file.exists():
         return "balanced"
 
-    text = config_file.read_text(encoding="utf-8")
+    text = config_file.read_text(encoding="utf-8-sig")
     try:
         parsed = tomllib.loads(text)
         profile_id = parsed.get("activeProfileId", "balanced")
@@ -674,7 +674,7 @@ def apply_world_config_diffs(paths: InstancePaths, pending: dict, profile: dict,
     if not manifest_path.exists():
         return []
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     entries = manifest.get("entries", {})
     if not isinstance(entries, dict):
         return []
@@ -734,7 +734,7 @@ def load_profile(paths: InstancePaths, profile_id: str) -> tuple[Path, dict]:
     profile_path = paths.mod_config_dir / "presets" / f"{profile_id}.json"
     if not profile_path.exists():
         raise SystemExit(f"Profile not found: {profile_path}")
-    return profile_path, json.loads(profile_path.read_text(encoding="utf-8"))
+    return profile_path, json.loads(profile_path.read_text(encoding="utf-8-sig"))
 
 
 def profile_config_items(profile: dict) -> list[dict]:
@@ -838,7 +838,7 @@ def require_base_line(base_lines: list[str], base_index: int, expected: str) -> 
 
 
 def read_lines(path: Path) -> list[str]:
-    return path.read_text(encoding="utf-8").splitlines()
+    return path.read_text(encoding="utf-8-sig").splitlines()
 
 
 def write_lines(path: Path, lines: list[str]) -> None:
@@ -876,7 +876,7 @@ def load_default_manifest(paths: InstancePaths) -> dict:
             "updatedAt": "",
             "entries": {},
         }
-    data = json.loads(paths.default_manifest.read_text(encoding="utf-8"))
+    data = json.loads(paths.default_manifest.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise SystemExit(f"Invalid defaults manifest: {paths.default_manifest}")
     if not isinstance(data.get("entries"), dict):
@@ -958,7 +958,7 @@ def load_world_diff_manifest(paths: InstancePaths, world_id: str) -> dict:
             "updatedAt": "",
             "entries": {},
         }
-    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict):
         raise SystemExit(f"Invalid world diff manifest: {manifest_path}")
     if not isinstance(data.get("entries"), dict):
@@ -999,8 +999,8 @@ KEY_VALUE = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*=\s*(.+)$")
 
 
 def merge_toml_overlay(target: Path, overlay: Path) -> None:
-    target_lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
-    overlay_entries = collect_toml_entries(overlay.read_text(encoding="utf-8").splitlines())
+    target_lines = target.read_text(encoding="utf-8-sig").splitlines() if target.exists() else []
+    overlay_entries = collect_toml_entries(overlay.read_text(encoding="utf-8-sig").splitlines())
 
     for (section, key), line in overlay_entries.items():
         start = find_section_start(target_lines, section)
@@ -1070,7 +1070,7 @@ def set_active_profile(paths: InstancePaths, profile: dict, dry_run: bool) -> li
     line = f'activeProfileId = "{profile_id}"'
     config_file.parent.mkdir(parents=True, exist_ok=True)
     if config_file.exists():
-        text = config_file.read_text(encoding="utf-8")
+        text = config_file.read_text(encoding="utf-8-sig")
         text, count = re.subn(r'activeProfileId\s*=\s*"[^"]*"', line, text)
         if count == 0:
             separator = "" if text.endswith(("\n", "\r")) else "\n"

@@ -72,6 +72,10 @@ public final class QualityRuntime {
         return ModQualityPickerConfig.activeProfileId();
     }
 
+    public static void setActiveProfileId(String profileId) throws IOException {
+        writeActiveProfileConfig(profileId);
+    }
+
     public static RuntimeSelection currentSelection() {
         QualityProfile activeProfile = activeProfile().orElse(QualityProfile.empty(ModQualityPickerConfig.activeProfileId(), ModQualityPickerConfig.activeProfileId()));
         Map<String, String> configHashes = ConfigFileManager.hashConfigFiles(ProfilePaths.gameDirectory(), activeProfile);
