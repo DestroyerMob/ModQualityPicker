@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import difflib
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -24,6 +26,13 @@ DEFAULTS_MANIFEST = "defaults-manifest.json"
 DIFF_EXTENSION = ".diff"
 WORLD_DIFFS_ROOT = "config-diffs"
 WORLD_DIFFS_MANIFEST = "config-diffs.json"
+IGNORED_REQUIRED_MOD_IDS = {
+    "fabricloader",
+    "forge",
+    "java",
+    "minecraft",
+    "neoforge",
+}
 SUPPORTED_CONFIG_SUFFIXES = (
     ".toml",
     ".json",
@@ -66,6 +75,10 @@ class InstancePaths:
         return self.mod_config_dir / "pending-profile.json"
 
     @property
+    def pending_selection(self) -> Path:
+        return self.mod_config_dir / "pending-selection.json"
+
+    @property
     def applied_profile(self) -> Path:
         return self.mod_config_dir / "applied-profile.json"
 
@@ -83,9 +96,22 @@ class InstancePaths:
         return self.world_mod_dir(world_id) / WORLD_DIFFS_MANIFEST
 
 
-def load_pending_profile(paths: InstancePaths) -> dict:
+@dataclass(frozen=True)
+class ModMetadata:
+    mod_ids: tuple[str, ...]
+    required_mod_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ModJar:
+    path: Path
+    mod_ids: tuple[str, ...]
+    required_mod_ids: tuple[str, ...]
+
+
+def load_pending_profile(paths: InstancePaths) -> dict | None:
     if not paths.pending_profile.exists():
-        raise SystemExit(f"No pending profile found at {paths.pending_profile}")
+        return None
     return json.loads(paths.pending_profile.read_text(encoding="utf-8"))
 
 
@@ -96,30 +122,202 @@ def profile_from_pending(pending: dict) -> dict:
     return profile
 
 
-def discover_mod_jars(mods_dir: Path) -> dict[str, Path]:
-    discovered: dict[str, Path] = {}
+def profile_id_from_pending(pending: dict) -> str:
+    profile = pending.get("profile", {})
+    if isinstance(profile, dict):
+        profile_id = profile.get("id", "")
+        if isinstance(profile_id, str) and profile_id:
+            return profile_id
+
+    profile_id = pending.get("activeProfileId", "")
+    if isinstance(profile_id, str) and profile_id:
+        return profile_id
+    return "balanced"
+
+
+def active_profile_id(paths: InstancePaths) -> str:
+    config_file = paths.config_dir / f"{MOD_ID}-common.toml"
+    if not config_file.exists():
+        return "balanced"
+
+    text = config_file.read_text(encoding="utf-8")
+    try:
+        parsed = tomllib.loads(text)
+        profile_id = parsed.get("activeProfileId", "balanced")
+        return profile_id if isinstance(profile_id, str) and profile_id else "balanced"
+    except tomllib.TOMLDecodeError:
+        match = re.search(r'activeProfileId\s*=\s*"([^"]+)"', text)
+        return match.group(1) if match else "balanced"
+
+
+def resolve_profile_for_apply(paths: InstancePaths, pending: dict | None) -> tuple[dict | None, dict | None]:
+    if pending is None:
+        profile_id = active_profile_id(paths)
+        try:
+            _, profile = load_profile(paths, profile_id)
+        except SystemExit:
+            return None, None
+        return profile, pending_record(profile_with_required_dependencies(paths, profile), "active-profile", "")
+
+    profile_id = profile_id_from_pending(pending)
+    try:
+        _, profile = load_profile(paths, profile_id)
+    except SystemExit:
+        profile = profile_from_pending(pending)
+
+    return profile, pending_record(profile_with_required_dependencies(paths, profile), pending.get("reason", "queued-profile"), pending.get("sourceWorldId", ""))
+
+
+def pending_record(profile: dict, reason: str, source_world_id: str) -> dict:
+    return {
+        "schemaVersion": 1,
+        "reason": reason if isinstance(reason, str) and reason else "active-profile",
+        "sourceWorldId": source_world_id if isinstance(source_world_id, str) else "",
+        "queuedAt": utc_now(),
+        "profile": profile,
+    }
+
+
+def discover_mod_jars(mods_dir: Path) -> dict[str, ModJar]:
+    discovered: dict[str, ModJar] = {}
     for path in sorted(mods_dir.glob("*.jar")) + sorted(mods_dir.glob("*.jar.disabled")):
-        mod_ids = read_mod_ids(path)
+        metadata = read_mod_metadata(path)
+        mod_ids = metadata.mod_ids or (fallback_mod_id(path),)
+        jar = ModJar(path, mod_ids, metadata.required_mod_ids)
         for mod_id in mod_ids:
-            discovered.setdefault(mod_id, path)
+            discovered.setdefault(mod_id, jar)
     return discovered
 
 
 def read_mod_ids(path: Path) -> list[str]:
+    return list(read_mod_metadata(path).mod_ids)
+
+
+def read_mod_metadata(path: Path) -> ModMetadata:
     try:
         with zipfile.ZipFile(path) as jar:
-            with jar.open("META-INF/neoforge.mods.toml") as metadata:
-                parsed = tomllib.loads(metadata.read().decode("utf-8"))
-    except (KeyError, OSError, tomllib.TOMLDecodeError, zipfile.BadZipFile):
-        return [fallback_mod_id(path)]
+            metadata = read_archive_mod_metadata(jar)
+    except (OSError, tomllib.TOMLDecodeError, zipfile.BadZipFile, json.JSONDecodeError):
+        return ModMetadata((fallback_mod_id(path),), ())
 
+    return metadata if metadata.mod_ids else ModMetadata((fallback_mod_id(path),), ())
+
+
+def read_archive_mod_ids(jar: zipfile.ZipFile, depth: int = 0) -> list[str]:
+    return list(read_archive_mod_metadata(jar, depth).mod_ids)
+
+
+def read_archive_mod_metadata(jar: zipfile.ZipFile, depth: int = 0) -> ModMetadata:
+    ids: list[str] = []
+    fabric_ids: list[str] = []
+    required: list[str] = []
+    fabric_required: list[str] = []
+    nested_mod_ids: list[str] = []
+    nested_required: list[str] = []
+    names = set(jar.namelist())
+    if "META-INF/neoforge.mods.toml" in names:
+        with jar.open("META-INF/neoforge.mods.toml") as metadata:
+            parsed = tomllib.loads(metadata.read().decode("utf-8"))
+            ids.extend(read_neoforge_mod_ids(parsed))
+            required.extend(read_neoforge_required_mod_ids(parsed))
+
+    if not ids and "fabric.mod.json" in names:
+        with jar.open("fabric.mod.json") as metadata:
+            parsed = json.loads(metadata.read().decode("utf-8"))
+            fabric_ids.extend(fabric_id_aliases(parsed))
+            fabric_required.extend(read_fabric_required_mod_ids(parsed))
+
+    if depth < 3:
+        for name in names:
+            if not name.endswith(".jar"):
+                continue
+            with jar.open(name) as nested:
+                try:
+                    with zipfile.ZipFile(io.BytesIO(nested.read())) as nested_jar:
+                        nested_metadata = read_archive_mod_metadata(nested_jar, depth + 1)
+                        nested_mod_ids.extend(nested_metadata.mod_ids)
+                        nested_required.extend(nested_metadata.required_mod_ids)
+                except (OSError, tomllib.TOMLDecodeError, zipfile.BadZipFile, json.JSONDecodeError):
+                    continue
+
+    if not ids:
+        ids.extend(fabric_ids)
+        required.extend(fabric_required)
+    ids.extend(nested_mod_ids)
+    required.extend(nested_required)
+    return ModMetadata(tuple(unique(ids)), tuple(unique_required(required)))
+
+
+def read_neoforge_mod_ids(parsed: dict) -> list[str]:
     mods = parsed.get("mods", [])
-    if isinstance(mods, list):
-        ids = [item.get("modId", "") for item in mods if isinstance(item, dict)]
-        ids = [item for item in ids if item]
-        if ids:
-            return ids
-    return [fallback_mod_id(path)]
+    if not isinstance(mods, list):
+        return []
+    return [item.get("modId", "") for item in mods if isinstance(item, dict) and item.get("modId", "")]
+
+
+def read_neoforge_required_mod_ids(parsed: dict) -> list[str]:
+    dependencies = parsed.get("dependencies", {})
+    if not isinstance(dependencies, dict):
+        return []
+
+    required: list[str] = []
+    for dependency_list in dependencies.values():
+        if not isinstance(dependency_list, list):
+            continue
+        for dependency in dependency_list:
+            if not isinstance(dependency, dict):
+                continue
+            mod_id = dependency.get("modId", "")
+            if not isinstance(mod_id, str) or not mod_id:
+                continue
+
+            dependency_type = str(dependency.get("type", "")).lower()
+            mandatory = dependency.get("mandatory")
+            if mandatory is False or dependency_type in {"optional", "incompatible", "discouraged"}:
+                continue
+            if dependency_type in {"", "required", "mandatory"} or mandatory is True:
+                required.extend(mod_id_aliases(mod_id))
+    return required
+
+
+def fabric_id_aliases(parsed: dict) -> list[str]:
+    mod_id = parsed.get("id", "")
+    if not isinstance(mod_id, str) or not mod_id:
+        return []
+    return mod_id_aliases(mod_id)
+
+
+def read_fabric_required_mod_ids(parsed: dict) -> list[str]:
+    depends = parsed.get("depends", {})
+    if not isinstance(depends, dict):
+        return []
+
+    required: list[str] = []
+    for mod_id in depends:
+        if isinstance(mod_id, str):
+            required.extend(mod_id_aliases(mod_id))
+    return required
+
+
+def mod_id_aliases(mod_id: str) -> list[str]:
+    normalized = mod_id.replace("-", "_")
+    if normalized == mod_id:
+        return [mod_id]
+    return [mod_id, normalized]
+
+
+def unique(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def unique_required(values: Iterable[str]) -> list[str]:
+    return [value for value in unique(values) if value not in IGNORED_REQUIRED_MOD_IDS]
 
 
 def fallback_mod_id(path: Path) -> str:
@@ -133,30 +331,173 @@ def apply_mod_states(paths: InstancePaths, profile: dict, dry_run: bool) -> list
         return []
 
     discovered = discover_mod_jars(paths.mods_dir)
+    desired_by_mod: dict[str, bool] = {
+        mod_id: False
+        for mod_id in discovered
+    }
+    locked_disabled_mod_ids: set[str] = set()
     actions: list[str] = []
     for mod_id, state in sorted(mods.items()):
-        if mod_id == MOD_ID:
-            continue
         if not isinstance(state, dict):
             continue
 
-        enabled = bool(state.get("enabled", True))
+        enabled = True if mod_id == MOD_ID else bool(state.get("enabled", True))
+        desired_by_mod[mod_id] = enabled
+        if not enabled and bool(state.get("locked", False)):
+            locked_disabled_mod_ids.add(mod_id)
+
+    actions.extend(enable_required_dependencies(discovered, desired_by_mod, locked_disabled_mod_ids))
+    enable_provided_runtime_modules(desired_by_mod)
+
+    desired_by_jar: dict[Path, bool] = {}
+    for mod_id, enabled in sorted(desired_by_mod.items()):
         jar = discovered.get(mod_id)
         if jar is None:
-            actions.append(f"missing {mod_id}")
             continue
+        desired_by_jar[jar.path] = desired_by_jar.get(jar.path, False) or enabled
 
+    for jar, enabled in desired_by_jar.items():
         if enabled and jar.name.endswith(".jar.disabled"):
             target = jar.with_name(jar.name.removesuffix(".disabled"))
-            actions.append(f"enable {jar.name} -> {target.name}")
+            if target.exists():
+                actions.append(f"enable {jar.name} already satisfied by {target.name}; remove duplicate disabled copy")
+            else:
+                actions.append(f"enable {jar.name} -> {target.name}")
             if not dry_run:
-                jar.rename(target)
+                if target.exists():
+                    jar.unlink()
+                else:
+                    jar.rename(target)
+        elif enabled and jar.name.endswith(".jar"):
+            duplicate = jar.with_name(jar.name + ".disabled")
+            if duplicate.exists():
+                actions.append(f"enable {jar.name} already satisfied; remove duplicate disabled copy {duplicate.name}")
+                if not dry_run:
+                    duplicate.unlink()
         elif not enabled and jar.name.endswith(".jar"):
             target = jar.with_name(jar.name + ".disabled")
             actions.append(f"disable {jar.name} -> {target.name}")
             if not dry_run:
-                jar.rename(target)
+                jar.replace(target)
+        elif not enabled and jar.name.endswith(".jar.disabled"):
+            duplicate = jar.with_name(jar.name.removesuffix(".disabled"))
+            if duplicate.exists():
+                actions.append(f"disable {jar.name} already satisfied; remove duplicate enabled copy {duplicate.name}")
+                if not dry_run:
+                    duplicate.unlink()
     return actions
+
+
+def enable_provided_runtime_modules(desired_by_mod: dict[str, bool]) -> None:
+    if desired_by_mod.get("fabric_api") is not True and desired_by_mod.get("forgified_fabric_api") is not True:
+        return
+
+    for mod_id in list(desired_by_mod):
+        if mod_id.startswith("fabric_"):
+            desired_by_mod[mod_id] = True
+    if "forgified_fabric_api" in desired_by_mod:
+        desired_by_mod["forgified_fabric_api"] = True
+
+
+def enable_required_dependencies(
+    discovered: dict[str, ModJar],
+    desired_by_mod: dict[str, bool],
+    locked_disabled_mod_ids: set[str] | None = None,
+) -> list[str]:
+    actions: list[str] = []
+    blocked = locked_disabled_mod_ids if locked_disabled_mod_ids is not None else set()
+    changed = True
+
+    while changed:
+        changed = False
+        for mod_id in list(desired_by_mod):
+            if desired_by_mod.get(mod_id) is not True:
+                continue
+
+            jar = discovered.get(mod_id)
+            if jar is None:
+                continue
+
+            for required_mod_id in jar.required_mod_ids:
+                required_jar = discovered.get(required_mod_id)
+                if required_mod_id in blocked:
+                    actions.append(f"skip {required_mod_id} because it is locked disabled")
+                    continue
+                if required_jar is None:
+                    continue
+
+                if desired_by_mod.get(required_mod_id) is not True:
+                    desired_by_mod[required_mod_id] = True
+                    actions.append(f"require {required_mod_id} because {mod_id} requires it")
+                    changed = True
+
+                for bundled_id in required_jar.mod_ids:
+                    if desired_by_mod.get(bundled_id) is not True:
+                        desired_by_mod[bundled_id] = True
+                        changed = True
+    return actions
+
+
+def profile_with_required_dependencies(paths: InstancePaths, profile: dict) -> dict:
+    mods = profile.get("mods", {})
+    if not isinstance(mods, dict):
+        return profile
+
+    discovered = discover_mod_jars(paths.mods_dir)
+    desired_by_mod: dict[str, bool] = {
+        mod_id: False
+        for mod_id in discovered
+    }
+    locked_disabled_mod_ids: set[str] = set()
+    for mod_id, state in sorted(mods.items()):
+        if not isinstance(state, dict):
+            continue
+
+        enabled = True if mod_id == MOD_ID else bool(state.get("enabled", True))
+        desired_by_mod[mod_id] = enabled
+        if not enabled and bool(state.get("locked", False)):
+            locked_disabled_mod_ids.add(mod_id)
+
+    actions = enable_required_dependencies(discovered, desired_by_mod, locked_disabled_mod_ids)
+    enable_provided_runtime_modules(desired_by_mod)
+
+    resolved = copy.deepcopy(profile)
+    resolved_mods = resolved.get("mods")
+    if not isinstance(resolved_mods, dict):
+        resolved_mods = {}
+        resolved["mods"] = resolved_mods
+
+    for mod_id, enabled in sorted(desired_by_mod.items()):
+        if not enabled:
+            continue
+
+        state = resolved_mods.get(mod_id)
+        if not isinstance(state, dict):
+            resolved_mods[mod_id] = {
+                "enabled": True,
+                "locked": mod_id == MOD_ID,
+                "reason": required_reason(mod_id, actions),
+            }
+            continue
+
+        if not bool(state.get("enabled", True)):
+            updated = dict(state)
+            updated["enabled"] = True
+            updated["locked"] = True
+            updated["reason"] = required_reason(mod_id, actions)
+            resolved_mods[mod_id] = updated
+
+    return resolved
+
+
+def required_reason(mod_id: str, actions: list[str]) -> str:
+    prefix = f"require {mod_id} because "
+    for action in actions:
+        if action.startswith(prefix):
+            return f"Required because {action[len(prefix):]}."
+    if mod_id == MOD_ID:
+        return "Required by Mod Quality Picker."
+    return "Required by an enabled mod."
 
 
 def apply_config_files(paths: InstancePaths, profile: dict, dry_run: bool) -> list[str]:
@@ -726,21 +1067,32 @@ def set_active_profile(paths: InstancePaths, profile: dict, dry_run: bool) -> li
     action = f"set activeProfileId = {profile_id}"
     if dry_run:
         return [action]
+    line = f'activeProfileId = "{profile_id}"'
+    config_file.parent.mkdir(parents=True, exist_ok=True)
     if config_file.exists():
         text = config_file.read_text(encoding="utf-8")
-        text = re.sub(r'activeProfileId\s*=\s*"[^"]*"', f'activeProfileId = "{profile_id}"', text)
+        text, count = re.subn(r'activeProfileId\s*=\s*"[^"]*"', line, text)
+        if count == 0:
+            separator = "" if text.endswith(("\n", "\r")) else "\n"
+            text = f"{text}{separator}{line}\n"
         config_file.write_text(text, encoding="utf-8")
+    else:
+        config_file.write_text(line + "\n", encoding="utf-8")
     return [action]
 
 
 def apply_pending(args: argparse.Namespace) -> int:
     paths = InstancePaths.from_root(Path(args.instance_root))
     pending = load_pending_profile(paths)
-    profile = profile_from_pending(pending)
+    profile, applied = resolve_profile_for_apply(paths, pending)
+    if profile is None or applied is None:
+        print(f"No pending profile found and no active preset found for {active_profile_id(paths)}.")
+        return 0
+
     actions = []
     actions.extend(apply_mod_states(paths, profile, args.dry_run))
     actions.extend(apply_config_files(paths, profile, args.dry_run))
-    actions.extend(apply_world_config_diffs(paths, pending, profile, args.world_id, args.dry_run))
+    actions.extend(apply_world_config_diffs(paths, applied, profile, args.world_id, args.dry_run))
     actions.extend(set_active_profile(paths, profile, args.dry_run))
 
     for action in actions:
@@ -748,8 +1100,9 @@ def apply_pending(args: argparse.Namespace) -> int:
 
     if not args.dry_run and not args.keep_pending:
         paths.mod_config_dir.mkdir(parents=True, exist_ok=True)
-        paths.applied_profile.write_text(json.dumps(pending, indent=2) + "\n", encoding="utf-8")
+        paths.applied_profile.write_text(json.dumps(applied, indent=2) + "\n", encoding="utf-8")
         paths.pending_profile.unlink(missing_ok=True)
+        paths.pending_selection.unlink(missing_ok=True)
     return 0
 
 

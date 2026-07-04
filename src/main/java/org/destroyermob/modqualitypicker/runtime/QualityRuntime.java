@@ -12,16 +12,22 @@ import org.destroyermob.modqualitypicker.profile.ProfileStore;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class QualityRuntime {
     private static final ProfileStore PROFILE_STORE = new ProfileStore();
     private static final ProfileRepository PROFILE_REPOSITORY = new ProfileRepository(PROFILE_STORE);
+    private static final Pattern ACTIVE_PROFILE_ID = Pattern.compile("(?m)^\\s*activeProfileId\\s*=\\s*\"[^\"]*\"\\s*$");
 
     private QualityRuntime() {
     }
@@ -54,10 +60,22 @@ public final class QualityRuntime {
         return PROFILE_REPOSITORY.findPreset(ModQualityPickerConfig.activeProfileId());
     }
 
+    public static String activeProfileId() {
+        return ModQualityPickerConfig.activeProfileId();
+    }
+
     public static RuntimeSelection currentSelection() {
         QualityProfile activeProfile = activeProfile().orElse(QualityProfile.empty(ModQualityPickerConfig.activeProfileId(), ModQualityPickerConfig.activeProfileId()));
         Map<String, String> configHashes = ConfigFileManager.hashConfigFiles(ProfilePaths.gameDirectory(), activeProfile);
         return LoadedModSnapshot.capture(activeProfile.id(), configHashes);
+    }
+
+    public static List<String> availableModIds(QualityProfile profile) {
+        Set<String> modIds = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        modIds.addAll(LoadedModSnapshot.capture(profile.id()).enabledMods().keySet());
+        modIds.addAll(profile.mods().keySet());
+        modIds.addAll(ModJarCatalog.discoverModIds(ProfilePaths.gameDirectory()));
+        return List.copyOf(modIds);
     }
 
     public static RuntimeSelection selectionFromProfile(QualityProfile profile) {
@@ -71,6 +89,10 @@ public final class QualityRuntime {
             }
         }
         return new RuntimeSelection(RuntimeSelection.SCHEMA_VERSION, profile.id(), enabledMods, configHashes);
+    }
+
+    public static QualityProfile withRequiredDependencies(QualityProfile profile) throws IOException {
+        return ModJarCatalog.withRequiredDependencies(ProfilePaths.gameDirectory(), profile);
     }
 
     public static QualityProfile captureCurrentProfile(String id, String displayName) {
@@ -95,8 +117,20 @@ public final class QualityRuntime {
     }
 
     public static void queueProfileChange(QualityProfile profile, String reason, String sourceWorldId) throws IOException {
-        PROFILE_STORE.writePendingProfile(ProfilePaths.pendingProfile(), PendingProfileChange.of(profile, reason, sourceWorldId));
-        PROFILE_STORE.writeSelection(ProfilePaths.pendingSelection(), selectionFromProfile(profile));
+        QualityProfile resolvedProfile = withRequiredDependencies(profile);
+        PROFILE_REPOSITORY.writePreset(resolvedProfile);
+        PROFILE_STORE.writePendingProfile(ProfilePaths.pendingProfile(), PendingProfileChange.of(resolvedProfile, reason, sourceWorldId));
+        PROFILE_STORE.writeSelection(ProfilePaths.pendingSelection(), selectionFromProfile(resolvedProfile));
+        ConfigFileManager.applyProfileConfigFiles(ProfilePaths.gameDirectory(), resolvedProfile);
+        List<String> jarActions = prepareModJarsForProfile(resolvedProfile);
+        PROFILE_STORE.writePendingProfile(ProfilePaths.appliedProfile(), PendingProfileChange.of(resolvedProfile, "active-profile", sourceWorldId));
+        PROFILE_STORE.delete(ProfilePaths.pendingProfile());
+        PROFILE_STORE.delete(ProfilePaths.pendingSelection());
+        if (jarActions.isEmpty()) {
+            ModQualityPicker.LOGGER.info("Applied Mod Quality Picker profile '{}' for the next launch; mod jars already match", profile.id());
+        } else {
+            ModQualityPicker.LOGGER.info("Applied Mod Quality Picker profile '{}' for the next launch: {}", profile.id(), String.join(", ", jarActions));
+        }
     }
 
     public static void writeWorldProfile(Path worldDirectory, QualityProfile profile) throws IOException {
@@ -116,5 +150,37 @@ public final class QualityRuntime {
             }
         }
         return new ConfigFileOverride(configFile.path(), configFile.mode(), configFile.presetFile(), hash);
+    }
+
+    private static List<String> prepareModJarsForProfile(QualityProfile profile) throws IOException {
+        QualityProfile resolvedProfile = withRequiredDependencies(profile);
+        writeActiveProfileConfig(resolvedProfile.id());
+        return ModJarCatalog.applyProfile(ProfilePaths.gameDirectory(), resolvedProfile);
+    }
+
+    private static void writeActiveProfileConfig(String profileId) throws IOException {
+        ModQualityPickerConfig.ACTIVE_PROFILE_ID.set(profileId);
+
+        Path configPath = ProfilePaths.gameDirectory().resolve("config").resolve(ModQualityPicker.MOD_ID + "-common.toml");
+        Path parent = configPath.getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+
+        String line = "activeProfileId = \"" + profileId + "\"";
+        if (!Files.isRegularFile(configPath)) {
+            Files.writeString(configPath, line + System.lineSeparator(), StandardCharsets.UTF_8);
+            return;
+        }
+
+        String text = Files.readString(configPath, StandardCharsets.UTF_8);
+        Matcher matcher = ACTIVE_PROFILE_ID.matcher(text);
+        if (matcher.find()) {
+            Files.writeString(configPath, matcher.replaceFirst(line), StandardCharsets.UTF_8);
+            return;
+        }
+
+        String separator = text.endsWith(System.lineSeparator()) || text.endsWith("\n") ? "" : System.lineSeparator();
+        Files.writeString(configPath, text + separator + line + System.lineSeparator(), StandardCharsets.UTF_8);
     }
 }

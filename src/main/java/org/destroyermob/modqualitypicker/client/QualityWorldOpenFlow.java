@@ -8,7 +8,6 @@ import net.minecraft.client.gui.screens.worldselection.WorldSelectionList;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.storage.LevelSummary;
 import org.destroyermob.modqualitypicker.config.ModQualityPickerConfig;
-import org.destroyermob.modqualitypicker.configfile.ConfigFileManager;
 import org.destroyermob.modqualitypicker.profile.ProfileDiff;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
 import org.destroyermob.modqualitypicker.runtime.ProfilePaths;
@@ -58,7 +57,7 @@ public final class QualityWorldOpenFlow {
         } catch (IOException | RuntimeException exception) {
             minecraft.setScreen(new AlertScreen(
                     () -> minecraft.setScreen(screen),
-                    Component.translatable("modqualitypicker.world.error"),
+                    ClientText.text("modqualitypicker.world.error", "Quality Profile Error"),
                     Component.literal(exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage())
             ));
             return true;
@@ -83,7 +82,7 @@ public final class QualityWorldOpenFlow {
         } catch (IOException | RuntimeException exception) {
             minecraft.setScreen(new AlertScreen(
                     () -> minecraft.setScreen(returnScreen),
-                    Component.translatable("modqualitypicker.world.error"),
+                    ClientText.text("modqualitypicker.world.error", "Quality Profile Error"),
                     Component.literal(exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage())
             ));
             return;
@@ -96,11 +95,10 @@ public final class QualityWorldOpenFlow {
         Minecraft minecraft = Minecraft.getInstance();
         try {
             QualityRuntime.queueProfileChange(profile, "world-profile", worldId);
-            ConfigFileManager.applyProfileConfigFiles(ProfilePaths.gameDirectory(), profile);
         } catch (IOException exception) {
             minecraft.setScreen(new AlertScreen(
                     () -> minecraft.setScreen(returnScreen),
-                    Component.translatable("modqualitypicker.world.error"),
+                    ClientText.text("modqualitypicker.world.error", "Quality Profile Error"),
                     Component.literal(exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage())
             ));
             return;
@@ -111,8 +109,8 @@ public final class QualityWorldOpenFlow {
         } else {
             minecraft.setScreen(new AlertScreen(
                     () -> minecraft.setScreen(returnScreen),
-                    Component.translatable("modqualitypicker.world.queued.title"),
-                    Component.translatable("modqualitypicker.world.queued.body")
+                    ClientText.text("modqualitypicker.world.queued.title", "Profile Queued"),
+                    ClientText.text("modqualitypicker.world.queued.body", "The world profile has been queued. Restart the instance to load the requested mod and config set.")
             ));
         }
     }

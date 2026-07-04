@@ -47,6 +47,10 @@ public final class ProfilePaths {
         return instanceRoot().resolve("pending-profile.json");
     }
 
+    public static Path appliedProfile() {
+        return instanceRoot().resolve("applied-profile.json");
+    }
+
     public static Path packExportRoot() {
         Path configured = Path.of(ModQualityPickerConfig.PACK_EXPORT_ROOT.get());
         if (configured.isAbsolute()) {

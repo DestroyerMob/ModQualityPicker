@@ -47,6 +47,10 @@ public final class ProfileStore {
         write(path, change);
     }
 
+    public void delete(Path path) throws IOException {
+        Files.deleteIfExists(path);
+    }
+
     private <T> Optional<T> read(Path path, Class<T> type) throws IOException {
         if (!Files.exists(path)) {
             return Optional.empty();

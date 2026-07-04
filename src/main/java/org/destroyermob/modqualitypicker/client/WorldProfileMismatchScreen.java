@@ -30,7 +30,7 @@ public final class WorldProfileMismatchScreen extends Screen {
             QualityProfile worldProfile,
             ProfileDiff diff
     ) {
-        super(Component.translatable("modqualitypicker.world.title"));
+        super(ClientText.text("modqualitypicker.world.title", "World Quality Profile"));
         this.parent = parent;
         this.entry = entry;
         this.summary = summary;
@@ -44,13 +44,13 @@ public final class WorldProfileMismatchScreen extends Screen {
     protected void init() {
         int center = this.width / 2;
         int y = Math.max(118, this.height / 2 + 20);
-        this.addRenderableWidget(Button.builder(Component.translatable("modqualitypicker.world.continue_current"), button -> QualityWorldOpenFlow.acceptCurrentProfile(this.parent, this.entry, this.worldDirectory))
+        this.addRenderableWidget(Button.builder(ClientText.text("modqualitypicker.world.continue_current", "Continue Current"), button -> QualityWorldOpenFlow.acceptCurrentProfile(this.parent, this.entry, this.worldDirectory))
                 .bounds(center - 154, y, 150, 20)
                 .build());
-        this.addRenderableWidget(Button.builder(Component.translatable("modqualitypicker.world.use_world"), button -> QualityWorldOpenFlow.queueWorldProfile(this.parent, this.worldProfile, this.summary.getLevelId()))
+        this.addRenderableWidget(Button.builder(ClientText.text("modqualitypicker.world.use_world", "Use World Profile"), button -> QualityWorldOpenFlow.queueWorldProfile(this.parent, this.worldProfile, this.summary.getLevelId()))
                 .bounds(center + 4, y, 150, 20)
                 .build());
-        this.addRenderableWidget(Button.builder(Component.translatable("modqualitypicker.world.back"), button -> this.minecraft.setScreen(this.parent))
+        this.addRenderableWidget(Button.builder(ClientText.text("modqualitypicker.world.back", "Back"), button -> this.minecraft.setScreen(this.parent))
                 .bounds(center - 75, y + 26, 150, 20)
                 .build());
     }
@@ -74,18 +74,18 @@ public final class WorldProfileMismatchScreen extends Screen {
     }
 
     private void buildLines() {
-        this.lines.add(Component.translatable("modqualitypicker.world.diff.profile", this.worldProfile.displayName()));
+        this.lines.add(ClientText.text("modqualitypicker.world.diff.profile", "World profile: %s", this.worldProfile.displayName()));
         if (!this.diff.missingEnabledMods().isEmpty()) {
-            this.lines.add(Component.translatable("modqualitypicker.world.diff.missing", String.join(", ", this.diff.missingEnabledMods())));
+            this.lines.add(ClientText.text("modqualitypicker.world.diff.missing", "Missing required by world: %s", String.join(", ", this.diff.missingEnabledMods())));
         }
         if (!this.diff.loadedDisabledMods().isEmpty()) {
-            this.lines.add(Component.translatable("modqualitypicker.world.diff.disabled_loaded", String.join(", ", this.diff.loadedDisabledMods())));
+            this.lines.add(ClientText.text("modqualitypicker.world.diff.disabled_loaded", "Loaded but disabled by world: %s", String.join(", ", this.diff.loadedDisabledMods())));
         }
         if (!this.diff.newlyLoadedMods().isEmpty()) {
-            this.lines.add(Component.translatable("modqualitypicker.world.diff.newly_loaded", String.join(", ", this.diff.newlyLoadedMods())));
+            this.lines.add(ClientText.text("modqualitypicker.world.diff.newly_loaded", "Newly loaded mods/blocks for this world: %s", String.join(", ", this.diff.newlyLoadedMods())));
         }
         if (!this.diff.configHashMismatches().isEmpty()) {
-            this.lines.add(Component.translatable("modqualitypicker.world.diff.configs", String.join(", ", this.diff.configHashMismatches())));
+            this.lines.add(ClientText.text("modqualitypicker.world.diff.configs", "Config differences: %s", String.join(", ", this.diff.configHashMismatches())));
         }
         if (this.lines.size() == 1) {
             this.lines.add(Component.literal(this.worldDirectory.getFileName().toString()));

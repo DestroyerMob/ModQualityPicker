@@ -49,6 +49,10 @@ public final class ProfileRepository {
         store.writeProfile(ProfilePaths.preset(profile.id()), profile);
     }
 
+    public boolean deletePreset(QualityProfile profile) throws IOException {
+        return Files.deleteIfExists(ProfilePaths.preset(profile.id()));
+    }
+
     public int nextSortOrder() {
         return listPresets().stream()
                 .mapToInt(QualityProfile::sortOrder)

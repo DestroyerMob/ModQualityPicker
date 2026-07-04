@@ -3,6 +3,7 @@ package org.destroyermob.modqualitypicker.client;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.CycleButton;
 import net.minecraft.client.gui.components.Tooltip;
+import net.minecraft.client.gui.layouts.GridLayout;
 import net.minecraft.client.gui.layouts.LayoutElement;
 import net.minecraft.client.gui.layouts.LinearLayout;
 import net.minecraft.client.gui.screens.AlertScreen;
@@ -21,9 +22,15 @@ public final class QualityOptionsButton {
     }
 
     public static LayoutElement wrapOptionsContents(LayoutElement vanillaContents, OptionsScreen screen) {
-        LinearLayout layout = LinearLayout.vertical().spacing(8);
+        AbstractWidget qualityButton = createQualityCycleButton(screen);
+        if (vanillaContents instanceof GridLayout gridLayout) {
+            gridLayout.addChild(qualityButton, 5, 0);
+            return gridLayout;
+        }
+
+        LinearLayout layout = LinearLayout.vertical().spacing(4);
         layout.addChild(vanillaContents);
-        layout.addChild(createQualityCycleButton(screen));
+        layout.addChild(qualityButton);
         return layout;
     }
 
@@ -34,7 +41,7 @@ public final class QualityOptionsButton {
             CycleButton<QualityProfile> button = CycleButton.builder(QualityOptionsButton::profileName)
                     .withValues(List.of(empty))
                     .withInitialValue(empty)
-                    .create(0, 0, 200, 20, Component.translatable("modqualitypicker.settings.button"), (cycleButton, profile) -> {
+                    .create(0, 0, 150, 20, Component.translatable("modqualitypicker.settings.button"), (cycleButton, profile) -> {
                     });
             button.active = false;
             button.setTooltip(Tooltip.create(Component.translatable("modqualitypicker.settings.no_profiles")));
@@ -45,7 +52,7 @@ public final class QualityOptionsButton {
         CycleButton<QualityProfile> button = CycleButton.builder(QualityOptionsButton::profileName)
                 .withValues(profiles)
                 .withInitialValue(initial)
-                .create(0, 0, 200, 20, Component.translatable("modqualitypicker.settings.button"), (cycleButton, profile) -> queueProfile(screen, cycleButton, profile));
+                .create(0, 0, 150, 20, Component.translatable("modqualitypicker.settings.button"), (cycleButton, profile) -> queueProfile(screen, cycleButton, profile));
         button.setTooltip(initialTooltip(initial));
         return button;
     }
