@@ -50,8 +50,11 @@ public final class WorldProfileMismatchScreen extends Screen {
         this.addRenderableWidget(Button.builder(ClientText.text("modqualitypicker.world.use_world", "Use World Profile"), button -> QualityWorldOpenFlow.queueWorldProfile(this.parent, this.worldProfile, this.summary.getLevelId()))
                 .bounds(center + 4, y, 150, 20)
                 .build());
+        this.addRenderableWidget(Button.builder(ClientText.text("modqualitypicker.world.choose_profile", "Choose Profile"), button -> this.minecraft.setScreen(QualityProfileScreen.forWorldProfile(this.parent, this.worldProfile, this.summary.getLevelId())))
+                .bounds(center - 154, y + 26, 150, 20)
+                .build());
         this.addRenderableWidget(Button.builder(ClientText.text("modqualitypicker.world.back", "Back"), button -> this.minecraft.setScreen(this.parent))
-                .bounds(center - 75, y + 26, 150, 20)
+                .bounds(center + 4, y + 26, 150, 20)
                 .build());
     }
 

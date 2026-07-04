@@ -48,12 +48,13 @@ public final class QualityWorldOpenFlow {
                 return false;
             }
 
-            ProfileDiff diff = ProfileDiff.compare(worldProfile.get(), currentSelection);
+            QualityProfile targetProfile = QualityRuntime.profileForWorldSelection(worldProfile.get());
+            ProfileDiff diff = ProfileDiff.compare(targetProfile, currentSelection);
             if (!diff.hasDifferences()) {
                 return false;
             }
 
-            return handleMismatch(screen, entry, summary, worldDirectory, worldProfile.get(), diff);
+            return handleMismatch(screen, entry, summary, worldDirectory, targetProfile, diff);
         } catch (IOException | RuntimeException exception) {
             minecraft.setScreen(new AlertScreen(
                     () -> minecraft.setScreen(screen),

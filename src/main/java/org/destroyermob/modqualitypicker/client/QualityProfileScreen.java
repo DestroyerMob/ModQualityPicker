@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -58,6 +59,10 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private final Screen parent;
+    private final QualityProfile initialProfile;
+    private final String queueReason;
+    private final String sourceWorldId;
+    private final Set<String> temporaryProfileIds = new HashSet<>();
     private final List<QualityProfile> profiles = new ArrayList<>();
     private final List<String> catalogMods = new ArrayList<>();
     private final List<String> availableMods = new ArrayList<>();
@@ -78,11 +83,24 @@ public final class QualityProfileScreen extends Screen {
     private String activeProfileId = "balanced";
     private String activeProfileLabel = "Balanced";
     private QualityProfile draft = QualityProfile.empty("balanced", "Balanced");
+    private boolean initialSelectionPending = true;
+    private boolean draftTemporary;
     private Component status = CommonComponents.EMPTY;
 
     public QualityProfileScreen(Screen parent) {
+        this(parent, null, "client-menu", "");
+    }
+
+    static QualityProfileScreen forWorldProfile(Screen parent, QualityProfile worldProfile, String worldId) {
+        return new QualityProfileScreen(parent, worldProfile, "world-profile", worldId);
+    }
+
+    private QualityProfileScreen(Screen parent, QualityProfile initialProfile, String queueReason, String sourceWorldId) {
         super(Component.translatable("modqualitypicker.title"));
         this.parent = parent;
+        this.initialProfile = initialProfile;
+        this.queueReason = queueReason == null || queueReason.isBlank() ? "client-menu" : queueReason;
+        this.sourceWorldId = sourceWorldId == null ? "" : sourceWorldId;
     }
 
     @Override
@@ -387,7 +405,15 @@ public final class QualityProfileScreen extends Screen {
         String currentMod = selectedMod().orElse("");
         this.activeProfileId = QualityRuntime.activeProfileId();
         this.profiles.clear();
+        this.temporaryProfileIds.clear();
         this.profiles.addAll(QualityRuntime.profiles().listPresets());
+
+        String preferredId = this.initialSelectionPending ? this.activeProfileId : currentId;
+        addAppliedTemporaryProfile();
+        if (this.initialProfile != null) {
+            preferredId = addInitialProfileOption(preferredId);
+        }
+
         if (this.profiles.isEmpty()) {
             this.profiles.add(QualityRuntime.captureCurrentProfile("balanced", "Balanced"));
         }
@@ -399,12 +425,14 @@ public final class QualityProfileScreen extends Screen {
 
         this.selectedProfileIndex = clampIndex(this.selectedProfileIndex, this.profiles.size());
         for (int index = 0; index < this.profiles.size(); index++) {
-            if (this.profiles.get(index).id().equals(currentId)) {
+            if (this.profiles.get(index).id().equals(preferredId)) {
                 this.selectedProfileIndex = index;
                 break;
             }
         }
         this.draft = this.profiles.get(this.selectedProfileIndex);
+        this.draftTemporary = this.temporaryProfileIds.contains(this.draft.id());
+        this.initialSelectionPending = false;
 
         if (!this.catalogLoaded) {
             this.catalogMods.clear();
@@ -425,6 +453,38 @@ public final class QualityProfileScreen extends Screen {
         clampScrolls();
     }
 
+    private void addAppliedTemporaryProfile() {
+        QualityRuntime.appliedProfile()
+                .filter(profile -> profile.id().equals(this.activeProfileId))
+                .filter(profile -> !profileIdExists(profile.id()))
+                .ifPresent(profile -> addProfileOption(profile, true));
+    }
+
+    private String addInitialProfileOption(String fallbackPreferredId) {
+        try {
+            Optional<QualityProfile> matchedPreset = QualityRuntime.findMatchingPreset(this.initialProfile);
+            if (matchedPreset.isPresent()) {
+                return this.initialSelectionPending ? matchedPreset.get().id() : fallbackPreferredId;
+            }
+        } catch (IOException exception) {
+            this.status = Component.literal(exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage());
+        }
+
+        QualityProfile custom = QualityRuntime.customProfile(this.initialProfile);
+        addProfileOption(custom, true);
+        return this.initialSelectionPending ? custom.id() : fallbackPreferredId;
+    }
+
+    private void addProfileOption(QualityProfile profile, boolean temporary) {
+        if (profileIdExists(profile.id())) {
+            return;
+        }
+        this.profiles.add(profile);
+        if (temporary) {
+            this.temporaryProfileIds.add(profile.id());
+        }
+    }
+
     private void switchTab(Tab tab) {
         this.tab = tab;
         rebuildWidgets();
@@ -437,6 +497,7 @@ public final class QualityProfileScreen extends Screen {
         if (this.tab == Tab.PROFILES) {
             this.selectedProfileIndex = absoluteIndex;
             this.draft = this.profiles.get(absoluteIndex);
+            this.draftTemporary = this.temporaryProfileIds.contains(this.draft.id());
             rebuildWidgets();
         } else if (this.tab == Tab.MODS) {
             this.selectedModIndex = absoluteIndex;
@@ -452,7 +513,12 @@ public final class QualityProfileScreen extends Screen {
         }
 
         try {
-            this.draft = QualityRuntime.withRequiredDependencies(copyProfile(this.draft.id(), displayName, this.draft.mods(), this.draft.configFiles(), this.draft.options()));
+            String profileId = this.draftTemporary ? uniqueProfileId(displayName) : this.draft.id();
+            this.draft = QualityRuntime.withRequiredDependencies(copyProfile(profileId, displayName, this.draft.mods(), this.draft.configFiles(), this.draft.options()));
+            if (this.draftTemporary) {
+                this.draft = this.draft.withSortOrder(QualityRuntime.profiles().nextSortOrder());
+                this.draftTemporary = false;
+            }
             QualityRuntime.profiles().writePreset(this.draft);
             this.status = Component.translatable("modqualitypicker.message.profile_saved", this.draft.displayName());
             reloadData();
@@ -464,9 +530,13 @@ public final class QualityProfileScreen extends Screen {
 
     private void queueDraft() {
         try {
+            boolean temporary = this.draftTemporary;
             this.draft = QualityRuntime.withRequiredDependencies(this.draft);
-            QualityRuntime.profiles().writePreset(this.draft);
-            QualityRuntime.queueProfileChange(this.draft, "client-menu", "");
+            if (!temporary) {
+                QualityRuntime.profiles().writePreset(this.draft);
+            }
+            QualityRuntime.queueProfileChange(this.draft, this.queueReason, this.sourceWorldId);
+            this.draftTemporary = temporary;
             this.status = Component.translatable("modqualitypicker.message.profile_queued", this.draft.displayName());
             reloadData();
             rebuildWidgets();

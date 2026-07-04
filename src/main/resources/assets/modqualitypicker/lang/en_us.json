@@ -79,6 +79,7 @@
   "modqualitypicker.profile.performance": "Performance",
   "modqualitypicker.profile.quality": "Quality",
   "modqualitypicker.world.back": "Back",
+  "modqualitypicker.world.choose_profile": "Choose Profile",
   "modqualitypicker.world.continue_current": "Continue Current",
   "modqualitypicker.world.diff.configs": "Config differences: %s",
   "modqualitypicker.world.diff.disabled_loaded": "Loaded but disabled by world: %s",

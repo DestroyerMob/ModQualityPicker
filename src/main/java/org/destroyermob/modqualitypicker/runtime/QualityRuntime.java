@@ -25,6 +25,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class QualityRuntime {
+    public static final String CUSTOM_PROFILE_ID = "custom";
+    public static final String CUSTOM_PROFILE_NAME = "Custom";
     private static final ProfileStore PROFILE_STORE = new ProfileStore();
     private static final ProfileRepository PROFILE_REPOSITORY = new ProfileRepository(PROFILE_STORE);
     private static final Pattern ACTIVE_PROFILE_ID = Pattern.compile("(?m)^\\s*activeProfileId\\s*=\\s*\"[^\"]*\"\\s*$");
@@ -57,7 +59,13 @@ public final class QualityRuntime {
     }
 
     public static Optional<QualityProfile> activeProfile() {
-        return PROFILE_REPOSITORY.findPreset(ModQualityPickerConfig.activeProfileId());
+        String activeProfileId = ModQualityPickerConfig.activeProfileId();
+        Optional<QualityProfile> preset = PROFILE_REPOSITORY.findPreset(activeProfileId);
+        if (preset.isPresent()) {
+            return preset;
+        }
+        return appliedProfile()
+                .filter(profile -> profile.id().equals(activeProfileId));
     }
 
     public static String activeProfileId() {
@@ -91,6 +99,47 @@ public final class QualityRuntime {
         return new RuntimeSelection(RuntimeSelection.SCHEMA_VERSION, profile.id(), enabledMods, configHashes);
     }
 
+    public static Optional<QualityProfile> appliedProfile() {
+        try {
+            return PROFILE_STORE.readPendingProfile(ProfilePaths.appliedProfile())
+                    .map(PendingProfileChange::profile);
+        } catch (IOException exception) {
+            ModQualityPicker.LOGGER.warn("Could not read applied Mod Quality Picker profile", exception);
+            return Optional.empty();
+        }
+    }
+
+    public static Optional<QualityProfile> findMatchingPreset(QualityProfile profile) throws IOException {
+        for (QualityProfile preset : PROFILE_REPOSITORY.listPresets()) {
+            if (profilesMatch(profile, preset)) {
+                return Optional.of(preset);
+            }
+        }
+        return Optional.empty();
+    }
+
+    public static QualityProfile profileForWorldSelection(QualityProfile worldProfile) throws IOException {
+        return findMatchingPreset(worldProfile).orElseGet(() -> customProfile(worldProfile));
+    }
+
+    public static QualityProfile customProfile(QualityProfile source) {
+        return new QualityProfile(
+                QualityProfile.SCHEMA_VERSION,
+                CUSTOM_PROFILE_ID,
+                CUSTOM_PROFILE_NAME,
+                0,
+                "Temporary profile captured from a world.",
+                source.mods(),
+                source.configFiles(),
+                source.options()
+        );
+    }
+
+    public static boolean profilesMatch(QualityProfile left, QualityProfile right) throws IOException {
+        return enabledModIds(left).equals(enabledModIds(right))
+                && configHashes(left).equals(configHashes(right));
+    }
+
     public static QualityProfile withRequiredDependencies(QualityProfile profile) throws IOException {
         return ModJarCatalog.withRequiredDependencies(ProfilePaths.gameDirectory(), profile);
     }
@@ -118,7 +167,6 @@ public final class QualityRuntime {
 
     public static void queueProfileChange(QualityProfile profile, String reason, String sourceWorldId) throws IOException {
         QualityProfile resolvedProfile = withRequiredDependencies(profile);
-        PROFILE_REPOSITORY.writePreset(resolvedProfile);
         PROFILE_STORE.writePendingProfile(ProfilePaths.pendingProfile(), PendingProfileChange.of(resolvedProfile, reason, sourceWorldId));
         PROFILE_STORE.writeSelection(ProfilePaths.pendingSelection(), selectionFromProfile(resolvedProfile));
         ConfigFileManager.applyProfileConfigFiles(ProfilePaths.gameDirectory(), resolvedProfile);
@@ -150,6 +198,26 @@ public final class QualityRuntime {
             }
         }
         return new ConfigFileOverride(configFile.path(), configFile.mode(), configFile.presetFile(), hash);
+    }
+
+    private static Map<String, String> configHashes(QualityProfile profile) {
+        Map<String, String> hashes = new LinkedHashMap<>();
+        for (ConfigFileOverride configFile : profile.configFiles()) {
+            if (!configFile.sha256().isBlank()) {
+                hashes.put(configFile.path(), configFile.sha256());
+            }
+        }
+        return hashes;
+    }
+
+    private static Set<String> enabledModIds(QualityProfile profile) throws IOException {
+        Set<String> enabled = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        ModJarCatalog.resolveEnabledMods(ProfilePaths.gameDirectory(), profile).forEach((modId, isEnabled) -> {
+            if (isEnabled) {
+                enabled.add(modId);
+            }
+        });
+        return enabled;
     }
 
     private static List<String> prepareModJarsForProfile(QualityProfile profile) throws IOException {

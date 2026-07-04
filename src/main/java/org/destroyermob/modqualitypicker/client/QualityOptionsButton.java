@@ -14,6 +14,7 @@ import org.destroyermob.modqualitypicker.runtime.ProfilePaths;
 import org.destroyermob.modqualitypicker.runtime.QualityRuntime;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -35,7 +36,7 @@ public final class QualityOptionsButton {
     }
 
     private static AbstractWidget createQualityCycleButton(OptionsScreen screen) {
-        List<QualityProfile> profiles = QualityRuntime.profiles().listPresets();
+        List<QualityProfile> profiles = selectableProfiles();
         if (profiles.isEmpty()) {
             QualityProfile empty = QualityProfile.empty("none", "No Profiles");
             CycleButton<QualityProfile> button = CycleButton.builder(QualityOptionsButton::profileName)
@@ -59,6 +60,15 @@ public final class QualityOptionsButton {
 
     private static Component profileName(QualityProfile profile) {
         return Component.literal(profile.displayName());
+    }
+
+    private static List<QualityProfile> selectableProfiles() {
+        List<QualityProfile> profiles = new ArrayList<>(QualityRuntime.profiles().listPresets());
+        QualityRuntime.appliedProfile()
+                .filter(profile -> profile.id().equals(QualityRuntime.activeProfileId()))
+                .filter(profile -> profiles.stream().noneMatch(preset -> preset.id().equals(profile.id())))
+                .ifPresent(profiles::add);
+        return profiles;
     }
 
     private static QualityProfile initialProfile(List<QualityProfile> profiles) {
