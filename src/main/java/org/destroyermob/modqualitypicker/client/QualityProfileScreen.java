@@ -78,8 +78,10 @@ public final class QualityProfileScreen extends Screen {
     private Tab tab = Tab.MODS;
     private EditBox profileName;
     private EditBox modSearch;
+    private Button queueButton;
     private Button modEnabledButton;
     private Button modLockedButton;
+    private boolean queueButtonShiftMode;
     private String modSearchText = "";
     private boolean catalogLoaded;
     private String activeProfileId = "balanced";
@@ -107,6 +109,7 @@ public final class QualityProfileScreen extends Screen {
 
     @Override
     protected void init() {
+        this.queueButton = null;
         this.modEnabledButton = null;
         this.modLockedButton = null;
         reloadData();
@@ -137,6 +140,7 @@ public final class QualityProfileScreen extends Screen {
         drawList(guiGraphics, mouseX, mouseY);
         drawDetails(guiGraphics);
         guiGraphics.drawCenteredString(this.font, this.status, this.width / 2, this.height - 22, 0xA0D8FF);
+        updateQueueButtonLabel();
         for (Renderable renderable : this.renderables) {
             renderable.render(guiGraphics, mouseX, mouseY, partialTick);
         }
@@ -179,7 +183,7 @@ public final class QualityProfileScreen extends Screen {
         if (compactTopBar()) {
             int buttonWidth = Math.max(1, (contentWidth - gap) / 2);
             addButton(Component.translatable("modqualitypicker.editor.save"), x, firstRowY, buttonWidth, this::saveDraft);
-            addButton(Component.translatable("modqualitypicker.editor.queue"), x + buttonWidth + gap, firstRowY, Math.max(1, contentWidth - buttonWidth - gap), this::queueDraft);
+            this.queueButton = addButton(queueButtonLabel(), x + buttonWidth + gap, firstRowY, Math.max(1, contentWidth - buttonWidth - gap), this::queueOrRestartDraft);
 
             int secondRowY = firstRowY + 24;
             addButton(Component.translatable("modqualitypicker.editor.set_default"), x, secondRowY, buttonWidth, this::setSelectedProfileDefault);
@@ -193,13 +197,13 @@ public final class QualityProfileScreen extends Screen {
         }
 
         int saveWidth = 58;
-        int queueWidth = 62;
+        int queueWidth = 84;
         int defaultWidth = 92;
         int doneWidth = 64;
         int nextX = x;
         addButton(Component.translatable("modqualitypicker.editor.save"), nextX, firstRowY, saveWidth, this::saveDraft);
         nextX += saveWidth + gap;
-        addButton(Component.translatable("modqualitypicker.editor.queue"), nextX, firstRowY, queueWidth, this::queueDraft);
+        this.queueButton = addButton(queueButtonLabel(), nextX, firstRowY, queueWidth, this::queueOrRestartDraft);
         nextX += queueWidth + gap;
         addButton(Component.translatable("modqualitypicker.editor.set_default"), nextX, firstRowY, defaultWidth, this::setSelectedProfileDefault);
         addButton(Component.translatable("modqualitypicker.editor.done"), x + contentWidth - doneWidth, firstRowY, doneWidth, this::onClose);
@@ -354,7 +358,7 @@ public final class QualityProfileScreen extends Screen {
             drawString(guiGraphics, fit(Component.translatable("modqualitypicker.editor.profile_summary", profile.mods().size(), profile.sortOrder()).getString(), width), x, y + 12, secondary);
         } else if (this.tab == Tab.MODS) {
             String modId = this.filteredMods.get(index);
-            ModState state = this.draft.mods().getOrDefault(modId, ModState.enabledChoice());
+            ModState state = modState(modId);
             String marker = state.enabled() ? "[ON] " : "[OFF] ";
             String lock = state.locked() ? " locked" : "";
             drawString(guiGraphics, fit(marker + modId, width), x, y, primary);
@@ -390,7 +394,8 @@ public final class QualityProfileScreen extends Screen {
                     Component.translatable("modqualitypicker.editor.profile_internal_id", this.draft.id()),
                     Component.translatable("modqualitypicker.editor.profile_order", this.draft.sortOrder()),
                     Component.translatable("modqualitypicker.editor.active", this.activeProfileLabel),
-                    Component.translatable("modqualitypicker.editor.profile_hint")
+                    Component.translatable("modqualitypicker.editor.profile_hint"),
+                    Component.translatable("modqualitypicker.editor.queue_shift_hint")
             );
         }
 
@@ -401,11 +406,12 @@ public final class QualityProfileScreen extends Screen {
                     ? Component.translatable("modqualitypicker.editor.no_mods")
                     : Component.translatable("modqualitypicker.editor.no_matching_mods"));
             }
-            ModState state = this.draft.mods().getOrDefault(modId.get(), ModState.enabledChoice());
+            ModState state = modState(modId.get());
             return List.of(
                     Component.translatable("modqualitypicker.editor.mod_state", state.enabled(), state.locked()),
                     Component.translatable("modqualitypicker.editor.mod_position", this.selectedModIndex + 1, this.filteredMods.size()),
-                    Component.translatable("modqualitypicker.editor.mod_hint")
+                    Component.translatable("modqualitypicker.editor.mod_hint"),
+                    Component.translatable("modqualitypicker.editor.queue_shift_hint")
             );
         }
 
@@ -536,7 +542,44 @@ public final class QualityProfileScreen extends Screen {
         }
     }
 
+    private void queueOrRestartDraft() {
+        if (hasShiftDown()) {
+            confirmQueueAndQuit();
+        } else {
+            queueDraft();
+        }
+    }
+
     private void queueDraft() {
+        if (queueDraftChange()) {
+            reloadData();
+            rebuildWidgets();
+        }
+    }
+
+    private void confirmQueueAndQuit() {
+        QualityProfile profile = this.draft;
+        this.minecraft.setScreen(new ConfirmScreen(
+                confirmed -> {
+                    this.minecraft.setScreen(this);
+                    if (confirmed) {
+                        queueDraftAndQuit();
+                    }
+                },
+                Component.translatable("modqualitypicker.editor.queue_restart_confirm_title"),
+                Component.translatable("modqualitypicker.editor.queue_restart_confirm", profile.displayName()),
+                Component.translatable("modqualitypicker.editor.queue_restart"),
+                CommonComponents.GUI_CANCEL
+        ));
+    }
+
+    private void queueDraftAndQuit() {
+        if (queueDraftChange()) {
+            this.minecraft.stop();
+        }
+    }
+
+    private boolean queueDraftChange() {
         try {
             boolean temporary = this.draftTemporary;
             this.draft = QualityRuntime.withRequiredDependencies(this.draft);
@@ -546,10 +589,10 @@ public final class QualityProfileScreen extends Screen {
             QualityRuntime.queueProfileChange(this.draft, this.queueReason, this.sourceWorldId);
             this.draftTemporary = temporary;
             this.status = Component.translatable("modqualitypicker.message.profile_queued", this.draft.displayName());
-            reloadData();
-            rebuildWidgets();
+            return true;
         } catch (IOException exception) {
             showError(exception);
+            return false;
         }
     }
 
@@ -741,14 +784,14 @@ public final class QualityProfileScreen extends Screen {
 
     private void toggleSelectedMod() {
         selectedMod().ifPresent(modId -> {
-            ModState current = this.draft.mods().getOrDefault(modId, ModState.enabledChoice());
+            ModState current = modState(modId);
             putModState(modId, new ModState(!current.enabled(), current.locked(), current.reason()));
         });
     }
 
     private void toggleSelectedModLock() {
         selectedMod().ifPresent(modId -> {
-            ModState current = this.draft.mods().getOrDefault(modId, ModState.enabledChoice());
+            ModState current = modState(modId);
             putModState(modId, new ModState(current.enabled(), !current.locked(), current.reason()));
         });
     }
@@ -824,7 +867,11 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private Optional<ModState> selectedModState() {
-        return selectedMod().map(modId -> this.draft.mods().getOrDefault(modId, ModState.enabledChoice()));
+        return selectedMod().map(this::modState);
+    }
+
+    private ModState modState(String modId) {
+        return this.draft.mods().getOrDefault(modId, ModState.implicitChoice());
     }
 
     private void putModState(String modId, ModState state) {
@@ -1095,6 +1142,23 @@ public final class QualityProfileScreen extends Screen {
         this.modLockedButton.active = hasMod;
         this.modEnabledButton.setMessage(modEnabledButtonLabel());
         this.modLockedButton.setMessage(modLockedButtonLabel());
+    }
+
+    private void updateQueueButtonLabel() {
+        if (this.queueButton == null) {
+            return;
+        }
+        boolean shiftMode = hasShiftDown();
+        if (this.queueButtonShiftMode != shiftMode) {
+            this.queueButtonShiftMode = shiftMode;
+            this.queueButton.setMessage(queueButtonLabel());
+        }
+    }
+
+    private Component queueButtonLabel() {
+        return hasShiftDown()
+                ? Component.translatable("modqualitypicker.editor.queue_restart")
+                : Component.translatable("modqualitypicker.editor.queue");
     }
 
     private Component modEnabledButtonLabel() {

@@ -11,8 +11,11 @@ public record ModState(boolean enabled, boolean locked, String reason) {
         return new ModState(true, false, "");
     }
 
+    public static ModState implicitChoice() {
+        return disabledChoice("");
+    }
+
     public static ModState disabledChoice(String reason) {
         return new ModState(false, false, reason);
     }
 }
-
