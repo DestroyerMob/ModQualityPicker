@@ -4,6 +4,13 @@ Mod Quality Picker is a NeoForge 1.21.1 modpack tool for profile-based quality a
 
 The goal is to let a pack ship multiple curated experiences without splitting into separate modpacks. Pack developers define quality profiles, players can choose a profile or tweak allowed options, and worlds can remember the profile they expect.
 
+## Project Facts
+
+- Mod id: `modqualitypicker`
+- Current version: `0.1.0`
+- Target: Minecraft 1.21.1, NeoForge 21.1.234, Java 21
+- Common config: `config/modqualitypicker-common.toml`
+
 ## Implemented Scope
 
 This project now contains:
@@ -81,7 +88,13 @@ python3 tools/modqualitypicker_prism.py apply --instance-root /path/to/Prism/ins
 For this workspace, from the instance root:
 
 ```sh
-python3 /Users/ethanhellyer/Documents/minecraft-mod-sources/ModQualityPicker/tools/modqualitypicker_prism.py apply --instance-root .
+python3 "$MINECRAFT_MOD_SOURCE_ROOT/ModQualityPicker/tools/modqualitypicker_prism.py" apply --instance-root .
+```
+
+On Windows PowerShell:
+
+```powershell
+python "$env:MINECRAFT_MOD_SOURCE_ROOT\ModQualityPicker\tools\modqualitypicker_prism.py" apply --instance-root .
 ```
 
 The helper renames mod jars between `.jar` and `.jar.disabled`, regenerates live config files from `defaults + preset diff + world diff`, updates `activeProfileId`, and archives the pending profile as `applied-profile.json`.
