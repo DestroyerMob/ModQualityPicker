@@ -25,6 +25,7 @@ This project now contains:
 - A tabbed profile editor with scrollable Profiles and Mods lists.
 - Per-profile mod enabled/disabled toggles, locked toggles, and override removal.
 - Preset capture, queueing, config application, and pack export actions.
+- Profile validation for dependency conflicts before applying queued changes.
 - Automatic world-open mismatch checks through a client-side mixin.
 - A three-choice world mismatch screen: continue current, queue world profile, or back out.
 - Config file hashing plus replace-file and simple TOML merge application.
@@ -98,6 +99,20 @@ python "$env:MINECRAFT_MOD_SOURCE_ROOT\ModQualityPicker\tools\modqualitypicker_p
 ```
 
 The helper renames mod jars between `.jar` and `.jar.disabled`, regenerates live config files from `defaults + preset diff + world diff`, updates `activeProfileId`, and archives the pending profile as `applied-profile.json`.
+Before any files are changed, it validates the selected profile and refuses hard dependency conflicts, such as enabling a mod while locking one of its required dependencies disabled.
+Validation output includes `DEPENDENCY` lines for auto-enabled requirements and suggests the closest discovered mod id/jar when a profile contains a stale fallback id.
+
+To check the pending or active profile without applying it:
+
+```sh
+python3 tools/modqualitypicker_prism.py validate-profile --instance-root /path/to/Prism/instance
+```
+
+To validate a saved preset directly:
+
+```sh
+python3 tools/modqualitypicker_prism.py validate-profile --instance-root /path/to/Prism/instance --profile-id balanced
+```
 
 ## Config Baselines
 
@@ -154,4 +169,4 @@ The common config tracks the active profile, whether launch snapshots are writte
 - Runtime mod unloading is intentionally out of scope; mod enable/disable changes require restart and launcher/pre-launch helper support.
 - Very large config files fall back to a simpler prefix/suffix diff to avoid excessive memory use.
 - Structured TOML/JSON-aware diffs are still future work; current diffs are line-oriented and validated against their baseline before application.
-- Profile dependency validation and a fully automatic Prism launch integration are still future work.
+- A fully automatic Prism launch integration is still future work.

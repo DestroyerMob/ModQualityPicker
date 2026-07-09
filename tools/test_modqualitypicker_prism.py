@@ -89,6 +89,22 @@ class PrismHelperConfigTests(unittest.TestCase):
             jar.writestr("META-INF/neoforge.mods.toml", "\n".join(metadata))
         return path
 
+    def write_multi_id_neoforge_mod_jar(self, file_name: str, mod_ids: list[str]) -> Path:
+        path = self.mods_dir / file_name
+        metadata: list[str] = []
+        for mod_id in mod_ids:
+            metadata.extend([
+                "[[mods]]",
+                f'modId = "{mod_id}"',
+                'version = "1.0.0"',
+                f'displayName = "{mod_id}"',
+                "",
+            ])
+
+        with zipfile.ZipFile(path, "w") as jar:
+            jar.writestr("META-INF/neoforge.mods.toml", "\n".join(metadata))
+        return path
+
     def neoforge_metadata(self, mod_id: str, required_mod_ids: list[str] | None = None) -> str:
         required_mod_ids = required_mod_ids or []
         metadata = [
@@ -384,6 +400,8 @@ class PrismHelperConfigTests(unittest.TestCase):
         self.assertTrue((self.mods_dir / "library.jar").exists())
         self.assertFalse((self.mods_dir / "library.jar.disabled").exists())
         self.assertIn("require library because addon requires it", output.getvalue())
+        self.assertIn("DEPENDENCY require library because addon requires it", output.getvalue())
+        self.assertIn("WARNING profile disables library, but it will stay enabled because addon requires it", output.getvalue())
 
     def test_applied_profile_records_required_dependency_resolution(self) -> None:
         self.write_neoforge_mod_jar("addon.jar", "addon", ["library"])
@@ -423,7 +441,7 @@ class PrismHelperConfigTests(unittest.TestCase):
         self.assertTrue(applied["profile"]["mods"]["library"]["locked"])
         self.assertIn("Required because addon requires it.", applied["profile"]["mods"]["library"]["reason"])
 
-    def test_locked_disabled_dependency_does_not_disable_requiring_mod(self) -> None:
+    def test_locked_disabled_dependency_blocks_apply_before_mutating(self) -> None:
         self.write_neoforge_mod_jar("addon.jar", "addon", ["ecology"])
         self.write_neoforge_mod_jar("ecology.jar.disabled", "ecology")
         pending = {
@@ -455,12 +473,124 @@ class PrismHelperConfigTests(unittest.TestCase):
                 world_id="",
             ))
 
-        self.assertEqual(result, 0)
+        self.assertEqual(result, 1)
         self.assertTrue((self.mods_dir / "addon.jar").exists())
         self.assertFalse((self.mods_dir / "addon.jar.disabled").exists())
         self.assertFalse((self.mods_dir / "ecology.jar").exists())
         self.assertTrue((self.mods_dir / "ecology.jar.disabled").exists())
-        self.assertIn("skip ecology because it is locked disabled", output.getvalue())
+        self.assertTrue(self.paths.pending_profile.exists())
+        self.assertFalse(self.paths.applied_profile.exists())
+        self.assertIn("ERROR profile locks ecology disabled, but addon requires it", output.getvalue())
+
+    def test_validate_profile_reports_locked_disabled_dependency(self) -> None:
+        self.write_neoforge_mod_jar("addon.jar", "addon", ["ecology"])
+        self.write_neoforge_mod_jar("ecology.jar.disabled", "ecology")
+        profile_path = self.write_profile("balanced")
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["mods"] = {
+            "addon": {"enabled": True, "locked": False, "reason": ""},
+            "ecology": {"enabled": False, "locked": True, "reason": "disabled for performance"},
+        }
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = mqp.validate_profile(argparse.Namespace(
+                instance_root=str(self.root),
+                profile_id="balanced",
+            ))
+
+        self.assertEqual(result, 1)
+        self.assertIn("ERROR profile locks ecology disabled, but addon requires it", output.getvalue())
+
+    def test_validate_profile_warns_when_disabled_mod_id_shares_enabled_jar(self) -> None:
+        self.write_multi_id_neoforge_mod_jar("letsdo-api.jar", ["doapi", "terraform"])
+        profile_path = self.write_profile("balanced")
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["mods"] = {
+            "doapi": {"enabled": False, "locked": False, "reason": ""},
+            "terraform": {"enabled": True, "locked": False, "reason": ""},
+        }
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = mqp.validate_profile(argparse.Namespace(
+                instance_root=str(self.root),
+                profile_id="balanced",
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertIn("WARNING profile disables doapi, but its jar will stay enabled because the same jar also provides enabled mod id terraform", output.getvalue())
+
+    def test_locked_disabled_mod_id_sharing_enabled_jar_blocks_apply(self) -> None:
+        self.write_multi_id_neoforge_mod_jar("letsdo-api.jar.disabled", ["doapi", "terraform"])
+        pending = {
+            "schemaVersion": 1,
+            "reason": "test",
+            "sourceWorldId": "",
+            "queuedAt": "2026-01-01T00:00:00Z",
+            "profile": {
+                "schemaVersion": 1,
+                "id": "balanced",
+                "displayName": "Balanced",
+                "sortOrder": 10,
+                "description": "test",
+                "mods": {
+                    "doapi": {"enabled": False, "locked": True, "reason": "disabled for testing"},
+                    "terraform": {"enabled": True, "locked": False, "reason": ""},
+                },
+                "configFiles": [],
+                "options": {},
+            },
+        }
+        self.paths.pending_profile.write_text(json.dumps(pending, indent=2) + "\n", encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = mqp.apply_pending(argparse.Namespace(
+                instance_root=str(self.root),
+                dry_run=False,
+                keep_pending=True,
+                world_id="",
+            ))
+
+        self.assertEqual(result, 1)
+        self.assertFalse((self.mods_dir / "letsdo-api.jar").exists())
+        self.assertTrue((self.mods_dir / "letsdo-api.jar.disabled").exists())
+        self.assertIn("ERROR profile locks doapi disabled, but the same jar also provides enabled mod id terraform", output.getvalue())
+
+    def test_validate_profile_suggests_closest_discovered_mod_for_stale_id(self) -> None:
+        self.write_neoforge_mod_jar("farmers-cutting-regions-unexplored-1.21.1-1.1b-neoforge.jar", "mr_farmers_cuttingregionsunexplored")
+        profile_path = self.write_profile("balanced")
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["mods"] = {
+            "farmers_cutting_regions_unexplored_1_21_1_1_1b_neoforge": {"enabled": True, "locked": False, "reason": ""},
+        }
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = mqp.validate_profile(argparse.Namespace(
+                instance_root=str(self.root),
+                profile_id="balanced",
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertIn("closest discovered: mr_farmers_cuttingregionsunexplored (farmers-cutting-regions-unexplored-1.21.1-1.1b-neoforge.jar)", output.getvalue())
+
+    def test_modqualitypicker_stays_enabled_even_when_absent_from_profile(self) -> None:
+        self.write_neoforge_mod_jar("modqualitypicker.jar", mqp.MOD_ID)
+        self.write_game_file(f"config/{mqp.MOD_ID}-common.toml", 'activeProfileId = "balanced"\n')
+        self.write_profile("balanced")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = mqp.apply_pending(argparse.Namespace(
+                instance_root=str(self.root),
+                dry_run=False,
+                keep_pending=False,
+                world_id="",
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertTrue((self.mods_dir / "modqualitypicker.jar").exists())
+        self.assertFalse((self.mods_dir / "modqualitypicker.jar.disabled").exists())
 
     def test_untyped_neoforge_dependencies_are_required(self) -> None:
         addon = self.mods_dir / "addon.jar"

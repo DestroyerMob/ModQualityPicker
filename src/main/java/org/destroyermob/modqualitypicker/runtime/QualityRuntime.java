@@ -148,6 +148,14 @@ public final class QualityRuntime {
         return ModJarCatalog.withRequiredDependencies(ProfilePaths.gameDirectory(), profile);
     }
 
+    public static ProfileValidation validateProfile(QualityProfile profile) throws IOException {
+        return ModJarCatalog.validateProfile(ProfilePaths.gameDirectory(), profile);
+    }
+
+    public static ModJarCatalog.DisablePlan planDisableMod(QualityProfile profile, String modId, ModJarCatalog.DisableStrategy strategy) throws IOException {
+        return ModJarCatalog.planDisable(ProfilePaths.gameDirectory(), profile, modId, strategy);
+    }
+
     public static QualityProfile captureCurrentProfile(String id, String displayName) {
         RuntimeSelection selection = LoadedModSnapshot.capture(id);
         Map<String, ModState> mods = new LinkedHashMap<>();
@@ -170,6 +178,17 @@ public final class QualityRuntime {
     }
 
     public static void queueProfileChange(QualityProfile profile, String reason, String sourceWorldId) throws IOException {
+        ProfileValidation validation = validateProfile(profile);
+        if (validation.hasErrors()) {
+            throw new IOException(validation.exceptionMessage(profile.displayName()));
+        }
+        for (String warning : validation.warnings()) {
+            ModQualityPicker.LOGGER.warn("Mod Quality Picker profile '{}' validation warning: {}", profile.id(), warning);
+        }
+        for (String action : validation.actions()) {
+            ModQualityPicker.LOGGER.info("Mod Quality Picker profile '{}' dependency: {}", profile.id(), action);
+        }
+
         QualityProfile resolvedProfile = withRequiredDependencies(profile);
         PROFILE_STORE.writePendingProfile(ProfilePaths.pendingProfile(), PendingProfileChange.of(resolvedProfile, reason, sourceWorldId));
         PROFILE_STORE.writeSelection(ProfilePaths.pendingSelection(), selectionFromProfile(resolvedProfile));
@@ -225,6 +244,11 @@ public final class QualityRuntime {
     }
 
     private static List<String> prepareModJarsForProfile(QualityProfile profile) throws IOException {
+        ProfileValidation validation = validateProfile(profile);
+        if (validation.hasErrors()) {
+            throw new IOException(validation.exceptionMessage(profile.displayName()));
+        }
+
         QualityProfile resolvedProfile = withRequiredDependencies(profile);
         writeActiveProfileConfig(resolvedProfile.id());
         return ModJarCatalog.applyProfile(ProfilePaths.gameDirectory(), resolvedProfile);

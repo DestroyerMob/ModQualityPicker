@@ -9,13 +9,17 @@ import net.minecraft.client.gui.screens.ConfirmScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.FormattedCharSequence;
+import net.minecraft.util.Mth;
 import org.destroyermob.modqualitypicker.configfile.ConfigFileManager;
 import org.destroyermob.modqualitypicker.export.ProfileExporter;
 import org.destroyermob.modqualitypicker.profile.ConfigFileOverride;
 import org.destroyermob.modqualitypicker.profile.ModState;
 import org.destroyermob.modqualitypicker.profile.ProfileOption;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
+import org.destroyermob.modqualitypicker.runtime.ModJarCatalog;
 import org.destroyermob.modqualitypicker.runtime.ProfilePaths;
+import org.destroyermob.modqualitypicker.runtime.ProfileValidation;
 import org.destroyermob.modqualitypicker.runtime.QualityRuntime;
 
 import java.io.IOException;
@@ -43,6 +47,7 @@ public final class QualityProfileScreen extends Screen {
     private static final int DETAIL_INSET = 12;
     private static final int DETAIL_LINE_STEP = 13;
     private static final int DETAIL_ACTION_GAP = 8;
+    private static final int DETAIL_SCROLL_STEP = 24;
     private static final int BUTTON_ROW_STEP = 24;
     private static final int PANEL_FILL = 0xD0000000;
     private static final int PANEL_BORDER = 0xFF505050;
@@ -58,6 +63,12 @@ public final class QualityProfileScreen extends Screen {
     private record ActionButton(Component label, Runnable action) {
     }
 
+    private record ScrollbarGeometry(int barX, int trackTop, int trackHeight, int thumbHeight, int thumbY) {
+    }
+
+    private record DetailScrollArea(int textTop, int textBottom, int maxScroll) {
+    }
+
     private final Screen parent;
     private final QualityProfile initialProfile;
     private final String queueReason;
@@ -68,6 +79,8 @@ public final class QualityProfileScreen extends Screen {
     private final List<String> availableMods = new ArrayList<>();
     private final List<String> filteredMods = new ArrayList<>();
     private final List<String> availableConfigs = new ArrayList<>();
+    private final Map<String, String> modResolutionWarnings = new LinkedHashMap<>();
+    private final List<Button> modActionButtons = new ArrayList<>();
 
     private int selectedProfileIndex;
     private int selectedModIndex;
@@ -75,6 +88,7 @@ public final class QualityProfileScreen extends Screen {
     private int profileScroll;
     private int modScroll;
     private int configScroll;
+    private int detailScroll;
     private Tab tab = Tab.MODS;
     private EditBox profileName;
     private EditBox modSearch;
@@ -82,6 +96,10 @@ public final class QualityProfileScreen extends Screen {
     private Button modEnabledButton;
     private Button modLockedButton;
     private boolean queueButtonShiftMode;
+    private boolean draggingListScrollbar;
+    private boolean draggingDetailScrollbar;
+    private int listScrollbarGrabOffset;
+    private int detailScrollbarGrabOffset;
     private String modSearchText = "";
     private boolean catalogLoaded;
     private String activeProfileId = "balanced";
@@ -112,6 +130,9 @@ public final class QualityProfileScreen extends Screen {
         this.queueButton = null;
         this.modEnabledButton = null;
         this.modLockedButton = null;
+        this.modActionButtons.clear();
+        this.draggingListScrollbar = false;
+        this.draggingDetailScrollbar = false;
         reloadData();
         initTopControls();
 
@@ -148,14 +169,42 @@ public final class QualityProfileScreen extends Screen {
 
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        if (button == 0 && insideList(mouseX, mouseY)) {
-            int visibleIndex = ((int) mouseY - listTop()) / ROW_HEIGHT;
-            int absoluteIndex = scrollForTab() + visibleIndex;
-            if (selectRow(absoluteIndex)) {
+        if (button == 0) {
+            if (startListScrollbarDrag(mouseX, mouseY) || startDetailScrollbarDrag(mouseX, mouseY)) {
                 return true;
+            }
+            if (insideList(mouseX, mouseY)) {
+                int visibleIndex = ((int) mouseY - listTop()) / ROW_HEIGHT;
+                int absoluteIndex = scrollForTab() + visibleIndex;
+                if (selectRow(absoluteIndex)) {
+                    return true;
+                }
             }
         }
         return super.mouseClicked(mouseX, mouseY, button);
+    }
+
+    @Override
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dragX, double dragY) {
+        if (button == 0 && this.draggingListScrollbar) {
+            updateListScrollFromMouse(mouseY);
+            return true;
+        }
+        if (button == 0 && this.draggingDetailScrollbar) {
+            updateDetailScrollFromMouse(mouseY);
+            return true;
+        }
+        return super.mouseDragged(mouseX, mouseY, button, dragX, dragY);
+    }
+
+    @Override
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        if (button == 0 && (this.draggingListScrollbar || this.draggingDetailScrollbar)) {
+            this.draggingListScrollbar = false;
+            this.draggingDetailScrollbar = false;
+            return true;
+        }
+        return super.mouseReleased(mouseX, mouseY, button);
     }
 
     @Override
@@ -165,6 +214,13 @@ public final class QualityProfileScreen extends Screen {
             int next = scrollForTab() - (int) Math.signum(scrollDeltaY) * step;
             setScrollForTab(next);
             return true;
+        }
+        if (insideDetails(mouseX, mouseY)) {
+            int maxScroll = maxDetailScroll();
+            if (maxScroll > 0) {
+                this.detailScroll = Mth.clamp(this.detailScroll - (int) Math.signum(scrollDeltaY) * DETAIL_SCROLL_STEP, 0, maxScroll);
+                return true;
+            }
         }
         return super.mouseScrolled(mouseX, mouseY, scrollDeltaX, scrollDeltaY);
     }
@@ -245,7 +301,10 @@ public final class QualityProfileScreen extends Screen {
         if (this.tab == Tab.MODS) {
             return List.of(
                     new ActionButton(modEnabledButtonLabel(), this::toggleSelectedMod),
-                    new ActionButton(modLockedButtonLabel(), this::toggleSelectedModLock)
+                    new ActionButton(modLockedButtonLabel(), this::toggleSelectedModLock),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.disable_dependents"), () -> disableSelectedMod(ModJarCatalog.DisableStrategy.DEPENDENTS)),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.disable_jar"), () -> disableSelectedMod(ModJarCatalog.DisableStrategy.JAR)),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.disable_unused_deps"), () -> disableSelectedMod(ModJarCatalog.DisableStrategy.UNUSED_DEPENDENCIES))
             );
         }
         return List.of();
@@ -272,6 +331,7 @@ public final class QualityProfileScreen extends Screen {
             int rowWidth = column == columns - 1 ? Math.max(1, contentWidth - column * (buttonWidth + gap)) : buttonWidth;
             Button button = addButton(actionButton.label(), buttonX, y + row * BUTTON_ROW_STEP, rowWidth, actionButton.action());
             if (this.tab == Tab.MODS) {
+                this.modActionButtons.add(button);
                 if (index == 0) {
                     this.modEnabledButton = button;
                 } else if (index == 1) {
@@ -338,14 +398,10 @@ public final class QualityProfileScreen extends Screen {
         }
 
         if (count > visibleRows) {
-            int barX = x + rowWidth - 6;
-            int trackTop = y + 2;
-            int trackHeight = visibleRows * ROW_HEIGHT - 4;
-            int thumbHeight = Math.max(18, trackHeight * visibleRows / count);
-            int maxScroll = maxScrollForTab();
-            int thumbY = trackTop + (maxScroll <= 0 ? 0 : (trackHeight - thumbHeight) * scroll / maxScroll);
-            guiGraphics.fill(barX, trackTop, barX + 3, trackTop + trackHeight, 0x70303030);
-            guiGraphics.fill(barX, thumbY, barX + 3, thumbY + thumbHeight, 0xC0A0A0A0);
+            listScrollbarGeometry().ifPresent(scrollbar -> {
+                guiGraphics.fill(scrollbar.barX(), scrollbar.trackTop(), scrollbar.barX() + 3, scrollbar.trackTop() + scrollbar.trackHeight(), 0x70303030);
+                guiGraphics.fill(scrollbar.barX(), scrollbar.thumbY(), scrollbar.barX() + 3, scrollbar.thumbY() + scrollbar.thumbHeight(), 0xC0A0A0A0);
+            });
         }
     }
 
@@ -359,10 +415,11 @@ public final class QualityProfileScreen extends Screen {
         } else if (this.tab == Tab.MODS) {
             String modId = this.filteredMods.get(index);
             ModState state = modState(modId);
-            String marker = state.enabled() ? "[ON] " : "[OFF] ";
+            String warning = this.modResolutionWarnings.get(modId);
+            String marker = warning == null ? state.enabled() ? "[ON] " : "[OFF] " : "[ON*] ";
             String lock = state.locked() ? " locked" : "";
-            drawString(guiGraphics, fit(marker + modId, width), x, y, primary);
-            drawString(guiGraphics, fit(stateDescription(state) + lock, width), x, y + 12, secondary);
+            drawString(guiGraphics, fit(marker + modId, width), x, y, warning == null ? primary : 0xFFE0A0);
+            drawString(guiGraphics, fit(warning == null ? stateDescription(state) + lock : Component.translatable("modqualitypicker.editor.mod_stays_loaded").getString(), width), x, y + 12, warning == null ? secondary : 0xE8C878);
         }
     }
 
@@ -378,13 +435,172 @@ public final class QualityProfileScreen extends Screen {
         drawString(guiGraphics, detailTitle(), x, y, 0xFFFFFF);
         y += 18;
 
-        for (Component line : detailLines()) {
-            if (y + this.font.lineHeight > textBottom) {
-                break;
-            }
-            drawString(guiGraphics, fit(line.getString(), width), x, y, 0xD0D0D0);
-            y += DETAIL_LINE_STEP;
+        int textTop = y;
+        if (textTop + this.font.lineHeight > textBottom) {
+            return;
         }
+        int textWidth = Math.max(1, width - 8);
+        List<FormattedCharSequence> lines = wrappedDetailLines(textWidth);
+        int maxScroll = maxDetailScroll(lines, textTop, textBottom);
+        this.detailScroll = Mth.clamp(this.detailScroll, 0, maxScroll);
+
+        guiGraphics.enableScissor(detailX() + 1, textTop, detailX() + detailWidth() - 1, textBottom);
+        try {
+            int lineY = textTop - this.detailScroll;
+            for (FormattedCharSequence line : lines) {
+                if (lineY + this.font.lineHeight > textTop && lineY < textBottom) {
+                    guiGraphics.drawString(this.font, line, x, lineY, 0xD0D0D0, true);
+                }
+                lineY += DETAIL_LINE_STEP;
+            }
+        } finally {
+            guiGraphics.disableScissor();
+        }
+
+        drawDetailScrollbar(guiGraphics, maxScroll, textTop, textBottom);
+    }
+
+    private List<FormattedCharSequence> wrappedDetailLines(int width) {
+        List<FormattedCharSequence> wrapped = new ArrayList<>();
+        for (Component line : detailLines()) {
+            List<FormattedCharSequence> split = this.font.split(line, width);
+            if (split.isEmpty()) {
+                wrapped.add(FormattedCharSequence.EMPTY);
+            } else {
+                wrapped.addAll(split);
+            }
+        }
+        return wrapped;
+    }
+
+    private int maxDetailScroll() {
+        return detailScrollArea().map(DetailScrollArea::maxScroll).orElse(0);
+    }
+
+    private Optional<DetailScrollArea> detailScrollArea() {
+        int width = detailWidth() - DETAIL_INSET * 2;
+        int rows = actionButtonRows(actionButtons().size(), actionButtonColumns(Math.max(1, width)));
+        int textTop = detailTop() + DETAIL_INSET + 18;
+        int textBottom = actionButtonY(rows) - DETAIL_ACTION_GAP;
+        if (textTop + this.font.lineHeight > textBottom) {
+            return Optional.empty();
+        }
+        int maxScroll = maxDetailScroll(wrappedDetailLines(Math.max(1, width - 8)), textTop, textBottom);
+        return Optional.of(new DetailScrollArea(textTop, textBottom, maxScroll));
+    }
+
+    private int maxDetailScroll(List<FormattedCharSequence> lines, int textTop, int textBottom) {
+        int visibleHeight = Math.max(1, textBottom - textTop);
+        int contentHeight = lines.size() * DETAIL_LINE_STEP;
+        return Math.max(0, contentHeight - visibleHeight);
+    }
+
+    private void drawDetailScrollbar(GuiGraphics guiGraphics, int maxScroll, int textTop, int textBottom) {
+        if (maxScroll <= 0) {
+            return;
+        }
+
+        ScrollbarGeometry scrollbar = detailScrollbarGeometry(maxScroll, textTop, textBottom);
+        guiGraphics.fill(scrollbar.barX(), scrollbar.trackTop(), scrollbar.barX() + 3, scrollbar.trackTop() + scrollbar.trackHeight(), 0x70303030);
+        guiGraphics.fill(scrollbar.barX(), scrollbar.thumbY(), scrollbar.barX() + 3, scrollbar.thumbY() + scrollbar.thumbHeight(), 0xC0A0A0A0);
+    }
+
+    private Optional<ScrollbarGeometry> listScrollbarGeometry() {
+        int count = itemCountForTab();
+        int visibleRows = visibleRows();
+        if (count <= visibleRows) {
+            return Optional.empty();
+        }
+
+        int rowWidth = listWidth();
+        int trackTop = listTop() + 2;
+        int trackHeight = visibleRows * ROW_HEIGHT - 4;
+        int thumbHeight = Math.max(18, trackHeight * visibleRows / count);
+        int maxScroll = maxScrollForTab();
+        int thumbY = trackTop + (maxScroll <= 0 ? 0 : (trackHeight - thumbHeight) * scrollForTab() / maxScroll);
+        return Optional.of(new ScrollbarGeometry(listX() + rowWidth - 6, trackTop, trackHeight, thumbHeight, thumbY));
+    }
+
+    private ScrollbarGeometry detailScrollbarGeometry(int maxScroll, int textTop, int textBottom) {
+        int trackTop = textTop + 1;
+        int trackHeight = Math.max(1, textBottom - textTop - 2);
+        int contentHeight = trackHeight + maxScroll;
+        int thumbHeight = Math.max(18, trackHeight * trackHeight / Math.max(1, contentHeight));
+        int thumbY = trackTop + (trackHeight - thumbHeight) * this.detailScroll / maxScroll;
+        return new ScrollbarGeometry(detailX() + detailWidth() - 6, trackTop, trackHeight, thumbHeight, thumbY);
+    }
+
+    private boolean startListScrollbarDrag(double mouseX, double mouseY) {
+        Optional<ScrollbarGeometry> geometry = listScrollbarGeometry();
+        if (geometry.isEmpty() || !insideScrollbar(mouseX, mouseY, geometry.get())) {
+            return false;
+        }
+
+        ScrollbarGeometry scrollbar = geometry.get();
+        this.draggingListScrollbar = true;
+        this.listScrollbarGrabOffset = scrollbarThumbContains(mouseX, mouseY, scrollbar)
+                ? (int) mouseY - scrollbar.thumbY()
+                : scrollbar.thumbHeight() / 2;
+        updateListScrollFromMouse(mouseY);
+        return true;
+    }
+
+    private boolean startDetailScrollbarDrag(double mouseX, double mouseY) {
+        Optional<DetailScrollArea> area = detailScrollArea();
+        if (area.isEmpty() || area.get().maxScroll() <= 0) {
+            return false;
+        }
+
+        ScrollbarGeometry scrollbar = detailScrollbarGeometry(area.get().maxScroll(), area.get().textTop(), area.get().textBottom());
+        if (!insideScrollbar(mouseX, mouseY, scrollbar)) {
+            return false;
+        }
+
+        this.draggingDetailScrollbar = true;
+        this.detailScrollbarGrabOffset = scrollbarThumbContains(mouseX, mouseY, scrollbar)
+                ? (int) mouseY - scrollbar.thumbY()
+                : scrollbar.thumbHeight() / 2;
+        updateDetailScrollFromMouse(mouseY);
+        return true;
+    }
+
+    private void updateListScrollFromMouse(double mouseY) {
+        Optional<ScrollbarGeometry> geometry = listScrollbarGeometry();
+        if (geometry.isEmpty()) {
+            return;
+        }
+
+        ScrollbarGeometry scrollbar = geometry.get();
+        int maxScroll = maxScrollForTab();
+        int travel = Math.max(1, scrollbar.trackHeight() - scrollbar.thumbHeight());
+        int thumbTop = Mth.clamp((int) mouseY - this.listScrollbarGrabOffset, scrollbar.trackTop(), scrollbar.trackTop() + travel);
+        setScrollForTab(Math.round((float) (thumbTop - scrollbar.trackTop()) * maxScroll / travel));
+    }
+
+    private void updateDetailScrollFromMouse(double mouseY) {
+        Optional<DetailScrollArea> area = detailScrollArea();
+        if (area.isEmpty() || area.get().maxScroll() <= 0) {
+            return;
+        }
+
+        ScrollbarGeometry scrollbar = detailScrollbarGeometry(area.get().maxScroll(), area.get().textTop(), area.get().textBottom());
+        int travel = Math.max(1, scrollbar.trackHeight() - scrollbar.thumbHeight());
+        int thumbTop = Mth.clamp((int) mouseY - this.detailScrollbarGrabOffset, scrollbar.trackTop(), scrollbar.trackTop() + travel);
+        this.detailScroll = Mth.clamp(Math.round((float) (thumbTop - scrollbar.trackTop()) * area.get().maxScroll() / travel), 0, area.get().maxScroll());
+    }
+
+    private boolean insideScrollbar(double mouseX, double mouseY, ScrollbarGeometry scrollbar) {
+        return mouseX >= scrollbar.barX() - 4
+                && mouseX < scrollbar.barX() + 8
+                && mouseY >= scrollbar.trackTop()
+                && mouseY < scrollbar.trackTop() + scrollbar.trackHeight();
+    }
+
+    private boolean scrollbarThumbContains(double mouseX, double mouseY, ScrollbarGeometry scrollbar) {
+        return mouseX >= scrollbar.barX() - 4
+                && mouseX < scrollbar.barX() + 8
+                && mouseY >= scrollbar.thumbY()
+                && mouseY < scrollbar.thumbY() + scrollbar.thumbHeight();
     }
 
     private List<Component> detailLines() {
@@ -407,15 +623,45 @@ public final class QualityProfileScreen extends Screen {
                     : Component.translatable("modqualitypicker.editor.no_matching_mods"));
             }
             ModState state = modState(modId.get());
-            return List.of(
-                    Component.translatable("modqualitypicker.editor.mod_state", state.enabled(), state.locked()),
-                    Component.translatable("modqualitypicker.editor.mod_position", this.selectedModIndex + 1, this.filteredMods.size()),
-                    Component.translatable("modqualitypicker.editor.mod_hint"),
-                    Component.translatable("modqualitypicker.editor.queue_shift_hint")
-            );
+            List<Component> lines = new ArrayList<>();
+            lines.add(Component.translatable("modqualitypicker.editor.mod_state", state.enabled(), state.locked()));
+            selectedModResolutionWarning(modId.get()).ifPresent(warning -> lines.add(Component.translatable("modqualitypicker.editor.mod_resolution_warning", warning)));
+            lines.add(Component.translatable("modqualitypicker.editor.mod_position", this.selectedModIndex + 1, this.filteredMods.size()));
+            lines.add(Component.translatable("modqualitypicker.editor.mod_hint"));
+            lines.add(Component.translatable("modqualitypicker.editor.queue_shift_hint"));
+            return lines;
         }
 
         return List.of();
+    }
+
+    private Optional<Component> selectedModResolutionWarning(String modId) {
+        return Optional.ofNullable(this.modResolutionWarnings.get(modId)).map(Component::literal);
+    }
+
+    private void refreshModResolutionWarnings() {
+        this.modResolutionWarnings.clear();
+        try {
+            ProfileValidation validation = QualityRuntime.validateProfile(this.draft);
+            for (String warning : validation.warnings()) {
+                disabledModIdFromWarning(warning).ifPresent(modId -> this.modResolutionWarnings.putIfAbsent(modId, warning));
+            }
+        } catch (IOException ignored) {
+            this.modResolutionWarnings.clear();
+        }
+    }
+
+    private Optional<String> disabledModIdFromWarning(String warning) {
+        String prefix = "profile disables ";
+        String separator = ", but ";
+        if (!warning.startsWith(prefix)) {
+            return Optional.empty();
+        }
+        int separatorIndex = warning.indexOf(separator, prefix.length());
+        if (separatorIndex <= prefix.length()) {
+            return Optional.empty();
+        }
+        return Optional.of(warning.substring(prefix.length(), separatorIndex));
     }
 
     private void reloadData() {
@@ -451,6 +697,7 @@ public final class QualityProfileScreen extends Screen {
         this.draft = this.profiles.get(this.selectedProfileIndex);
         this.draftTemporary = this.temporaryProfileIds.contains(this.draft.id());
         this.initialSelectionPending = false;
+        refreshModResolutionWarnings();
 
         if (!this.catalogLoaded) {
             this.catalogMods.clear();
@@ -505,6 +752,7 @@ public final class QualityProfileScreen extends Screen {
 
     private void switchTab(Tab tab) {
         this.tab = tab;
+        this.detailScroll = 0;
         rebuildWidgets();
     }
 
@@ -516,9 +764,11 @@ public final class QualityProfileScreen extends Screen {
             this.selectedProfileIndex = absoluteIndex;
             this.draft = this.profiles.get(absoluteIndex);
             this.draftTemporary = this.temporaryProfileIds.contains(this.draft.id());
+            this.detailScroll = 0;
             rebuildWidgets();
         } else if (this.tab == Tab.MODS) {
             this.selectedModIndex = absoluteIndex;
+            this.detailScroll = 0;
             updateModActionButtons();
         }
         return true;
@@ -796,12 +1046,70 @@ public final class QualityProfileScreen extends Screen {
         });
     }
 
+    private void disableSelectedMod(ModJarCatalog.DisableStrategy strategy) {
+        selectedMod().ifPresent(modId -> {
+            try {
+                ModJarCatalog.DisablePlan plan = QualityRuntime.planDisableMod(this.draft, modId, strategy);
+                if (plan.isEmpty()) {
+                    this.status = Component.translatable("modqualitypicker.message.no_disable_changes", modId);
+                    return;
+                }
+                if (plan.entries().size() == 1) {
+                    applyDisablePlan(plan);
+                } else {
+                    confirmDisablePlan(plan);
+                }
+            } catch (IOException exception) {
+                showError(exception);
+            }
+        });
+    }
+
+    private void confirmDisablePlan(ModJarCatalog.DisablePlan plan) {
+        List<String> modIds = plan.modIds();
+        this.minecraft.setScreen(new ConfirmScreen(
+                confirmed -> {
+                    this.minecraft.setScreen(this);
+                    if (confirmed) {
+                        applyDisablePlan(plan);
+                    }
+                },
+                Component.translatable("modqualitypicker.editor.disable_plan_title"),
+                Component.translatable("modqualitypicker.editor.disable_plan_confirm", modIds.size(), disablePreview(modIds)),
+                Component.translatable("modqualitypicker.editor.disable_plan_apply"),
+                CommonComponents.GUI_CANCEL
+        ));
+    }
+
+    private void applyDisablePlan(ModJarCatalog.DisablePlan plan) {
+        Map<String, ModState> mods = new LinkedHashMap<>(this.draft.mods());
+        for (ModJarCatalog.DisableEntry entry : plan.entries()) {
+            ModState current = mods.getOrDefault(entry.modId(), ModState.implicitChoice());
+            mods.put(entry.modId(), new ModState(false, current.locked(), entry.reason()));
+        }
+        this.draft = copyProfile(this.draft.id(), this.draft.displayName(), mods, this.draft.configFiles(), this.draft.options());
+        this.status = Component.translatable("modqualitypicker.message.mods_disabled", plan.entries().size(), plan.rootModId());
+        refreshModResolutionWarnings();
+        this.detailScroll = 0;
+        updateModActionButtons();
+    }
+
+    private String disablePreview(List<String> modIds) {
+        int limit = 12;
+        if (modIds.size() <= limit) {
+            return String.join(", ", modIds);
+        }
+        return String.join(", ", modIds.subList(0, limit)) + " +" + (modIds.size() - limit) + " more";
+    }
+
     private void removeSelectedModOverride() {
         selectedMod().ifPresent(modId -> {
             Map<String, ModState> mods = new LinkedHashMap<>(this.draft.mods());
             mods.remove(modId);
             this.draft = copyProfile(this.draft.id(), this.draft.displayName(), mods, this.draft.configFiles(), this.draft.options());
             this.status = Component.translatable("modqualitypicker.message.mod_removed", modId);
+            refreshModResolutionWarnings();
+            this.detailScroll = 0;
         });
     }
 
@@ -879,6 +1187,8 @@ public final class QualityProfileScreen extends Screen {
         mods.put(modId, state);
         this.draft = copyProfile(this.draft.id(), this.draft.displayName(), mods, this.draft.configFiles(), this.draft.options());
         this.status = Component.translatable("modqualitypicker.message.mod_updated", modId);
+        refreshModResolutionWarnings();
+        this.detailScroll = 0;
         updateModActionButtons();
     }
 
@@ -917,8 +1227,12 @@ public final class QualityProfileScreen extends Screen {
             }
         }
 
+        int previousSelectedModIndex = this.selectedModIndex;
         int preservedIndex = preserveModId.isBlank() ? -1 : this.filteredMods.indexOf(preserveModId);
         this.selectedModIndex = preservedIndex >= 0 ? preservedIndex : clampIndex(this.selectedModIndex, this.filteredMods.size());
+        if (this.selectedModIndex != previousSelectedModIndex) {
+            this.detailScroll = 0;
+        }
         this.modScroll = Math.max(0, Math.min(this.modScroll, Math.max(0, this.filteredMods.size() - visibleRows())));
         updateModActionButtons();
     }
@@ -1059,6 +1373,10 @@ public final class QualityProfileScreen extends Screen {
         return mouseX >= listX() && mouseX < listX() + listWidth() && mouseY >= listTop() && mouseY < listTop() + listHeight();
     }
 
+    private boolean insideDetails(double mouseX, double mouseY) {
+        return mouseX >= detailX() && mouseX < detailX() + detailWidth() && mouseY >= detailTop() && mouseY < detailTop() + detailHeight();
+    }
+
     private int itemCountForTab() {
         return switch (this.tab) {
             case PROFILES -> this.profiles.size();
@@ -1138,6 +1456,9 @@ public final class QualityProfileScreen extends Screen {
         }
 
         boolean hasMod = selectedMod().isPresent();
+        for (Button button : this.modActionButtons) {
+            button.active = hasMod;
+        }
         this.modEnabledButton.active = hasMod;
         this.modLockedButton.active = hasMod;
         this.modEnabledButton.setMessage(modEnabledButtonLabel());

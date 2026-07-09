@@ -42,6 +42,7 @@ Profile order is stored in `sortOrder`. The Profiles tab can move presets up or 
 - Client profile editor screen.
 - World-list mismatch prompt.
 - Config file hashing, default manifest validation, legacy TOML merge support, and default-plus-diff config application.
+- Profile validation that refuses locked-disabled dependencies required by enabled mods, reports dependency auto-enables, and suggests matching discovered jar ids for stale profile entries.
 - Pre-launch applier for Prism Launcher instances.
 - Pack export command that copies defaults and presets into the pack root.
 - Helper smoke tests for default capture and preset/world diff layering.
@@ -49,6 +50,5 @@ Profile order is stored in `sortOrder`. The Profiles tab can move presets up or 
 ## Next Hardening Pass
 
 - Add a clean throwaway-launch workflow for refreshing default baselines when mods update their generated config format.
-- Add a dependency validator so profiles cannot disable a required library while leaving dependents enabled.
 - Add richer option widgets for arbitrary pack-defined profile settings.
 - Add launcher documentation for running the Prism helper automatically before instance launch.

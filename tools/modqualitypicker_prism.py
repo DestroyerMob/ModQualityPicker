@@ -109,6 +109,15 @@ class ModJar:
     required_mod_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ModPlan:
+    discovered: dict[str, ModJar]
+    desired_by_mod: dict[str, bool]
+    dependency_actions: tuple[str, ...]
+    errors: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
 def load_pending_profile(paths: InstancePaths) -> dict | None:
     if not paths.pending_profile.exists():
         return None
@@ -325,29 +334,204 @@ def fallback_mod_id(path: Path) -> str:
     return re.sub(r"[^a-z0-9_]+", "_", name.lower()).strip("_")
 
 
-def apply_mod_states(paths: InstancePaths, profile: dict, dry_run: bool) -> list[str]:
-    mods = profile.get("mods", {})
-    if not isinstance(mods, dict):
-        return []
-
+def resolve_mod_plan(paths: InstancePaths, profile: dict) -> ModPlan:
     discovered = discover_mod_jars(paths.mods_dir)
     desired_by_mod: dict[str, bool] = {
         mod_id: False
         for mod_id in discovered
     }
     locked_disabled_mod_ids: set[str] = set()
-    actions: list[str] = []
+    warnings: list[str] = []
+
+    mods = profile.get("mods", {})
+    if not isinstance(mods, dict):
+        warnings.append("profile mods is not an object; discovered mods default to disabled")
+        mods = {}
+
     for mod_id, state in sorted(mods.items()):
         if not isinstance(state, dict):
+            warnings.append(f"profile entry {mod_id} is not an object")
             continue
 
         enabled = True if mod_id == MOD_ID else bool(state.get("enabled", True))
         desired_by_mod[mod_id] = enabled
         if not enabled and bool(state.get("locked", False)):
             locked_disabled_mod_ids.add(mod_id)
+        if enabled and mod_id not in discovered and mod_id != MOD_ID and mod_id not in IGNORED_REQUIRED_MOD_IDS:
+            warnings.append(missing_mod_warning(mod_id, discovered))
 
-    actions.extend(enable_required_dependencies(discovered, desired_by_mod, locked_disabled_mod_ids))
+    desired_by_mod[MOD_ID] = True
+
+    actions = enable_required_dependencies(discovered, desired_by_mod, locked_disabled_mod_ids)
     enable_provided_runtime_modules(desired_by_mod)
+    errors = locked_dependency_errors(discovered, desired_by_mod, locked_disabled_mod_ids)
+    errors.extend(locked_bundled_mod_errors(discovered, desired_by_mod, locked_disabled_mod_ids))
+    warnings.extend(disabled_dependency_warnings(discovered, desired_by_mod, mods))
+    return ModPlan(discovered, desired_by_mod, tuple(actions), tuple(errors), tuple(warnings))
+
+
+def disabled_dependency_warnings(
+    discovered: dict[str, ModJar],
+    desired_by_mod: dict[str, bool],
+    profile_mods: dict,
+) -> list[str]:
+    warnings: list[str] = []
+    for mod_id, state in sorted(profile_mods.items()):
+        if not isinstance(state, dict):
+            continue
+        if bool(state.get("enabled", True)) or bool(state.get("locked", False)):
+            continue
+        if mod_id not in discovered:
+            continue
+
+        if desired_by_mod.get(mod_id) is True:
+            dependents = enabled_dependents(discovered, desired_by_mod, mod_id)
+            if dependents:
+                warnings.append(disabled_dependency_warning(mod_id, dependents))
+        siblings = enabled_sibling_mod_ids(discovered, desired_by_mod, mod_id)
+        if siblings:
+            warnings.append(disabled_bundled_mod_warning(mod_id, siblings))
+    return warnings
+
+
+def enabled_dependents(discovered: dict[str, ModJar], desired_by_mod: dict[str, bool], required_mod_id: str) -> list[str]:
+    dependents: list[str] = []
+    for mod_id, enabled in sorted(desired_by_mod.items()):
+        if enabled is not True or mod_id == required_mod_id:
+            continue
+        jar = discovered.get(mod_id)
+        if jar is not None and required_mod_id in jar.required_mod_ids:
+            dependents.append(mod_id)
+    return dependents
+
+
+def enabled_sibling_mod_ids(discovered: dict[str, ModJar], desired_by_mod: dict[str, bool], mod_id: str) -> list[str]:
+    jar = discovered.get(mod_id)
+    if jar is None:
+        return []
+    return sorted(
+        sibling_id
+        for sibling_id in jar.mod_ids
+        if sibling_id != mod_id and desired_by_mod.get(sibling_id) is True
+    )
+
+
+def disabled_dependency_warning(mod_id: str, dependents: list[str]) -> str:
+    requiring = ", ".join(dependents)
+    verb = "requires" if len(dependents) == 1 else "require"
+    return f"profile disables {mod_id}, but it will stay enabled because {requiring} {verb} it"
+
+
+def disabled_bundled_mod_warning(mod_id: str, siblings: list[str]) -> str:
+    label = "enabled mod id " if len(siblings) == 1 else "enabled mod ids "
+    return f"profile disables {mod_id}, but its jar will stay enabled because the same jar also provides {label}{', '.join(siblings)}"
+
+
+def missing_mod_warning(mod_id: str, discovered: dict[str, ModJar]) -> str:
+    suggestions = related_mod_suggestions(mod_id, discovered)
+    if suggestions:
+        return f"profile enables {mod_id}, but no matching jar is installed; closest discovered: {', '.join(suggestions)}"
+    return f"profile enables {mod_id}, but no matching jar is installed"
+
+
+def related_mod_suggestions(mod_id: str, discovered: dict[str, ModJar]) -> list[str]:
+    query = compact_identity(mod_id)
+    query_tokens = identity_tokens(mod_id)
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for discovered_id, jar in sorted(discovered.items()):
+        suggestion = f"{discovered_id} ({jar.path.name})"
+        if suggestion in seen:
+            continue
+        seen.add(suggestion)
+
+        score = relation_score(query, query_tokens, discovered_id, jar.path.name)
+        if score > 0:
+            scored.append((score, suggestion))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [suggestion for _, suggestion in scored[:3]]
+
+
+def relation_score(query: str, query_tokens: set[str], *values: str) -> int:
+    score = 0
+    for value in values:
+        compact = compact_identity(value)
+        if compact and (compact in query or query in compact):
+            score += 8
+        value_tokens = identity_tokens(value)
+        score += len(query_tokens & value_tokens) * 2
+    return score
+
+
+def compact_identity(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def identity_tokens(value: str) -> set[str]:
+    ignored = {"jar", "disabled", "forge", "neoforge", "mc", "mod", "mr"}
+    tokens = re.split(r"[^a-z0-9]+", value.lower())
+    return {token for token in tokens if len(token) > 1 and not token.isdigit() and token not in ignored}
+
+
+def locked_dependency_errors(
+    discovered: dict[str, ModJar],
+    desired_by_mod: dict[str, bool],
+    locked_disabled_mod_ids: set[str],
+) -> list[str]:
+    errors: list[str] = []
+    seen: set[str] = set()
+    for mod_id, enabled in sorted(desired_by_mod.items()):
+        if enabled is not True:
+            continue
+
+        jar = discovered.get(mod_id)
+        if jar is None:
+            continue
+
+        for required_mod_id in jar.required_mod_ids:
+            if required_mod_id not in locked_disabled_mod_ids or required_mod_id not in discovered:
+                continue
+            message = f"profile locks {required_mod_id} disabled, but {mod_id} requires it"
+            if message not in seen:
+                seen.add(message)
+                errors.append(message)
+    return errors
+
+
+def locked_bundled_mod_errors(
+    discovered: dict[str, ModJar],
+    desired_by_mod: dict[str, bool],
+    locked_disabled_mod_ids: set[str],
+) -> list[str]:
+    errors: list[str] = []
+    for mod_id in sorted(locked_disabled_mod_ids):
+        if mod_id not in discovered:
+            continue
+        siblings = enabled_sibling_mod_ids(discovered, desired_by_mod, mod_id)
+        if siblings:
+            label = "enabled mod id " if len(siblings) == 1 else "enabled mod ids "
+            errors.append(f"profile locks {mod_id} disabled, but the same jar also provides {label}{', '.join(siblings)}")
+    return errors
+
+
+def print_validation(plan: ModPlan) -> None:
+    for action in plan.dependency_actions:
+        print(f"DEPENDENCY {action}")
+    for warning in plan.warnings:
+        print(f"WARNING {warning}")
+    for error in plan.errors:
+        print(f"ERROR {error}")
+
+
+def apply_mod_states(paths: InstancePaths, profile: dict, dry_run: bool, plan: ModPlan | None = None) -> list[str]:
+    plan = plan or resolve_mod_plan(paths, profile)
+    if plan.errors:
+        raise SystemExit("; ".join(plan.errors))
+
+    discovered = plan.discovered
+    desired_by_mod = plan.desired_by_mod
+    actions: list[str] = list(plan.dependency_actions)
 
     desired_by_jar: dict[Path, bool] = {}
     for mod_id, enabled in sorted(desired_by_mod.items()):
@@ -443,23 +627,7 @@ def profile_with_required_dependencies(paths: InstancePaths, profile: dict) -> d
     if not isinstance(mods, dict):
         return profile
 
-    discovered = discover_mod_jars(paths.mods_dir)
-    desired_by_mod: dict[str, bool] = {
-        mod_id: False
-        for mod_id in discovered
-    }
-    locked_disabled_mod_ids: set[str] = set()
-    for mod_id, state in sorted(mods.items()):
-        if not isinstance(state, dict):
-            continue
-
-        enabled = True if mod_id == MOD_ID else bool(state.get("enabled", True))
-        desired_by_mod[mod_id] = enabled
-        if not enabled and bool(state.get("locked", False)):
-            locked_disabled_mod_ids.add(mod_id)
-
-    actions = enable_required_dependencies(discovered, desired_by_mod, locked_disabled_mod_ids)
-    enable_provided_runtime_modules(desired_by_mod)
+    plan = resolve_mod_plan(paths, profile)
 
     resolved = copy.deepcopy(profile)
     resolved_mods = resolved.get("mods")
@@ -467,7 +635,7 @@ def profile_with_required_dependencies(paths: InstancePaths, profile: dict) -> d
         resolved_mods = {}
         resolved["mods"] = resolved_mods
 
-    for mod_id, enabled in sorted(desired_by_mod.items()):
+    for mod_id, enabled in sorted(plan.desired_by_mod.items()):
         if not enabled:
             continue
 
@@ -476,7 +644,7 @@ def profile_with_required_dependencies(paths: InstancePaths, profile: dict) -> d
             resolved_mods[mod_id] = {
                 "enabled": True,
                 "locked": mod_id == MOD_ID,
-                "reason": required_reason(mod_id, actions),
+                "reason": required_reason(mod_id, list(plan.dependency_actions)),
             }
             continue
 
@@ -484,7 +652,7 @@ def profile_with_required_dependencies(paths: InstancePaths, profile: dict) -> d
             updated = dict(state)
             updated["enabled"] = True
             updated["locked"] = True
-            updated["reason"] = required_reason(mod_id, actions)
+            updated["reason"] = required_reason(mod_id, list(plan.dependency_actions))
             resolved_mods[mod_id] = updated
 
     return resolved
@@ -1089,8 +1257,13 @@ def apply_pending(args: argparse.Namespace) -> int:
         print(f"No pending profile found and no active preset found for {active_profile_id(paths)}.")
         return 0
 
+    plan = resolve_mod_plan(paths, profile)
+    print_validation(plan)
+    if plan.errors:
+        return 1
+
     actions = []
-    actions.extend(apply_mod_states(paths, profile, args.dry_run))
+    actions.extend(apply_mod_states(paths, profile, args.dry_run, plan))
     actions.extend(apply_config_files(paths, profile, args.dry_run))
     actions.extend(apply_world_config_diffs(paths, applied, profile, args.world_id, args.dry_run))
     actions.extend(set_active_profile(paths, profile, args.dry_run))
@@ -1103,6 +1276,27 @@ def apply_pending(args: argparse.Namespace) -> int:
         paths.applied_profile.write_text(json.dumps(applied, indent=2) + "\n", encoding="utf-8")
         paths.pending_profile.unlink(missing_ok=True)
         paths.pending_selection.unlink(missing_ok=True)
+    return 0
+
+
+def validate_profile(args: argparse.Namespace) -> int:
+    paths = InstancePaths.from_root(Path(args.instance_root))
+    if args.profile_id:
+        _, profile = load_profile(paths, args.profile_id)
+    else:
+        pending = load_pending_profile(paths)
+        profile, _ = resolve_profile_for_apply(paths, pending)
+
+    if profile is None:
+        print(f"No pending profile found and no active preset found for {active_profile_id(paths)}.")
+        return 0
+
+    plan = resolve_mod_plan(paths, profile)
+    print_validation(plan)
+    if plan.errors:
+        return 1
+    if not plan.warnings:
+        print(f"Profile {profile.get('id', 'balanced')} is valid.")
     return 0
 
 
@@ -1185,6 +1379,11 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--dry-run", action="store_true")
     apply.add_argument("--keep-pending", action="store_true")
     apply.set_defaults(func=apply_pending)
+
+    validate_profile_parser = subparsers.add_parser("validate-profile", help="Check a pending, active, or named profile before applying it.")
+    validate_profile_parser.add_argument("--instance-root", default=".", help="Prism instance root or game directory.")
+    validate_profile_parser.add_argument("--profile-id", default="", help="Validate this saved preset instead of the pending/active profile.")
+    validate_profile_parser.set_defaults(func=validate_profile)
 
     export = subparsers.add_parser("export-presets", help="Copy in-instance presets into a pack root.")
     export.add_argument("--instance-root", default=".", help="Prism instance root or game directory.")

@@ -23,6 +23,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -46,13 +47,45 @@ public final class ModJarCatalog {
     public record ModJar(Path path, Set<String> modIds, Set<String> requiredModIds) {
     }
 
+    public enum DisableStrategy {
+        DEPENDENTS,
+        JAR,
+        UNUSED_DEPENDENCIES
+    }
+
+    public record DisableEntry(String modId, String reason) {
+        public DisableEntry {
+            modId = modId == null ? "" : modId;
+            reason = reason == null ? "" : reason;
+        }
+    }
+
+    public record DisablePlan(String rootModId, DisableStrategy strategy, List<DisableEntry> entries) {
+        public DisablePlan {
+            rootModId = rootModId == null ? "" : rootModId;
+            entries = entries == null ? List.of() : List.copyOf(entries);
+        }
+
+        public List<String> modIds() {
+            List<String> ids = new ArrayList<>();
+            for (DisableEntry entry : entries) {
+                ids.add(entry.modId());
+            }
+            return List.copyOf(ids);
+        }
+
+        public boolean isEmpty() {
+            return entries.isEmpty();
+        }
+    }
+
     private record ModMetadata(Set<String> modIds, Set<String> requiredModIds) {
         private static ModMetadata empty() {
             return new ModMetadata(new LinkedHashSet<>(), new LinkedHashSet<>());
         }
     }
 
-    private record ResolvedProfile(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, List<String> actions) {
+    private record ResolvedProfile(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, List<String> actions, Set<String> lockedDisabledModIds) {
     }
 
     private record CatalogCache(Path modsDirectory, List<String> fingerprint, Map<String, ModJar> discovered) {
@@ -195,6 +228,35 @@ public final class ModJarCatalog {
         return Map.copyOf(resolveProfile(gameDirectory, profile).desiredByMod());
     }
 
+    public static ProfileValidation validateProfile(Path gameDirectory, QualityProfile profile) throws IOException {
+        ResolvedProfile resolved = resolveProfile(gameDirectory, profile);
+        return new ProfileValidation(
+                validationErrors(resolved.discovered(), resolved.desiredByMod(), resolved.lockedDisabledModIds()),
+                validationWarnings(resolved.discovered(), resolved.desiredByMod(), profile),
+                resolved.actions()
+        );
+    }
+
+    public static DisablePlan planDisable(Path gameDirectory, QualityProfile profile, String modId, DisableStrategy strategy) throws IOException {
+        String rootModId = modId == null ? "" : modId;
+        DisableStrategy resolvedStrategy = strategy == null ? DisableStrategy.DEPENDENTS : strategy;
+        if (rootModId.isBlank()) {
+            return new DisablePlan(rootModId, resolvedStrategy, List.of());
+        }
+
+        ResolvedProfile resolved = resolveProfile(gameDirectory, profile);
+        Map<String, String> reasons = new LinkedHashMap<>();
+        switch (resolvedStrategy) {
+            case DEPENDENTS -> planDisableDependents(resolved.discovered(), resolved.desiredByMod(), rootModId, reasons);
+            case JAR -> planDisableJar(resolved.discovered(), rootModId, reasons);
+            case UNUSED_DEPENDENCIES -> planDisableUnusedDependencies(resolved.discovered(), resolved.desiredByMod(), rootModId, reasons);
+        }
+
+        List<DisableEntry> entries = new ArrayList<>();
+        reasons.forEach((id, reason) -> entries.add(new DisableEntry(id, reason)));
+        return new DisablePlan(rootModId, resolvedStrategy, entries);
+    }
+
     private static ResolvedProfile resolveProfile(Path gameDirectory, QualityProfile profile) throws IOException {
         Map<String, ModJar> discovered = discoverModJars(gameDirectory);
         Map<String, Boolean> desiredByMod = new LinkedHashMap<>();
@@ -210,9 +272,281 @@ public final class ModJarCatalog {
         }
         desiredByMod.put(ModQualityPicker.MOD_ID, true);
 
-        actions.addAll(enableRequiredDependencies(discovered, desiredByMod, lockedDisabledModIds(discovered, profile)));
+        Set<String> lockedDisabledModIds = lockedDisabledModIds(discovered, profile);
+        actions.addAll(enableRequiredDependencies(discovered, desiredByMod, lockedDisabledModIds));
         enableProvidedRuntimeModules(desiredByMod);
-        return new ResolvedProfile(discovered, desiredByMod, actions);
+        return new ResolvedProfile(discovered, desiredByMod, actions, lockedDisabledModIds);
+    }
+
+    private static void planDisableDependents(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, String rootModId, Map<String, String> reasons) {
+        addDisableReason(reasons, rootModId, "selected mod");
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (String modId : new TreeSet<>(desiredByMod.keySet())) {
+                if (!Objects.equals(desiredByMod.get(modId), true) || reasons.containsKey(modId)) {
+                    continue;
+                }
+
+                ModJar jar = discovered.get(modId);
+                if (jar == null) {
+                    continue;
+                }
+
+                for (String disabledModId : new ArrayList<>(reasons.keySet())) {
+                    if (jar.requiredModIds().contains(disabledModId)) {
+                        int before = reasons.size();
+                        addDisableReason(reasons, modId, "requires " + disabledModId);
+                        changed = changed || reasons.size() != before;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    private static void planDisableJar(Map<String, ModJar> discovered, String rootModId, Map<String, String> reasons) {
+        ModJar jar = discovered.get(rootModId);
+        if (jar == null) {
+            addDisableReason(reasons, rootModId, "selected mod");
+            return;
+        }
+
+        for (String siblingId : new TreeSet<>(jar.modIds())) {
+            addDisableReason(reasons, siblingId, siblingId.equals(rootModId) ? "selected mod" : "provided by the same jar");
+        }
+    }
+
+    private static void planDisableUnusedDependencies(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, String rootModId, Map<String, String> reasons) {
+        addDisableReason(reasons, rootModId, "selected mod");
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            Set<String> candidates = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            for (String disabledModId : reasons.keySet()) {
+                ModJar jar = discovered.get(disabledModId);
+                if (jar != null) {
+                    candidates.addAll(jar.requiredModIds());
+                }
+            }
+
+            for (String candidate : candidates) {
+                if (reasons.containsKey(candidate) || !Objects.equals(desiredByMod.get(candidate), true) || !discovered.containsKey(candidate)) {
+                    continue;
+                }
+                if (hasEnabledDependentOutside(discovered, desiredByMod, reasons.keySet(), candidate)) {
+                    continue;
+                }
+                if (hasEnabledSiblingOutside(discovered, desiredByMod, reasons.keySet(), candidate)) {
+                    continue;
+                }
+
+                int before = reasons.size();
+                addDisableReason(reasons, candidate, "unused dependency");
+                changed = changed || reasons.size() != before;
+            }
+        }
+    }
+
+    private static boolean hasEnabledDependentOutside(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, Set<String> disabledModIds, String requiredModId) {
+        for (Map.Entry<String, Boolean> entry : desiredByMod.entrySet()) {
+            String modId = entry.getKey();
+            if (!Objects.equals(entry.getValue(), true) || disabledModIds.contains(modId)) {
+                continue;
+            }
+
+            ModJar jar = discovered.get(modId);
+            if (jar != null && jar.requiredModIds().contains(requiredModId)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasEnabledSiblingOutside(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, Set<String> disabledModIds, String modId) {
+        ModJar jar = discovered.get(modId);
+        if (jar == null) {
+            return false;
+        }
+
+        for (String siblingId : jar.modIds()) {
+            if (!siblingId.equals(modId) && !disabledModIds.contains(siblingId) && Objects.equals(desiredByMod.get(siblingId), true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void addDisableReason(Map<String, String> reasons, String modId, String reason) {
+        if (modId == null || modId.isBlank() || modId.equals(ModQualityPicker.MOD_ID)) {
+            return;
+        }
+        reasons.putIfAbsent(modId, reason);
+    }
+
+    private static List<String> validationErrors(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, Set<String> lockedDisabledModIds) {
+        Set<String> errors = new LinkedHashSet<>();
+        for (Map.Entry<String, Boolean> entry : desiredByMod.entrySet()) {
+            if (!Objects.equals(entry.getValue(), true)) {
+                continue;
+            }
+
+            ModJar jar = discovered.get(entry.getKey());
+            if (jar == null) {
+                continue;
+            }
+
+            for (String requiredModId : jar.requiredModIds()) {
+                if (lockedDisabledModIds.contains(requiredModId) && discovered.containsKey(requiredModId)) {
+                    errors.add("profile locks " + requiredModId + " disabled, but " + entry.getKey() + " requires it");
+                }
+            }
+        }
+        for (String modId : lockedDisabledModIds) {
+            if (!discovered.containsKey(modId)) {
+                continue;
+            }
+            List<String> siblings = enabledSiblingModIds(discovered, desiredByMod, modId);
+            if (!siblings.isEmpty()) {
+                errors.add(lockedBundledModError(modId, siblings));
+            }
+        }
+        return List.copyOf(errors);
+    }
+
+    private static List<String> validationWarnings(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, QualityProfile profile) {
+        List<String> warnings = new ArrayList<>();
+        for (Map.Entry<String, ModState> entry : profile.mods().entrySet()) {
+            String modId = entry.getKey();
+            if (entry.getValue().enabled() && !discovered.containsKey(modId) && !modId.equals(ModQualityPicker.MOD_ID) && !IGNORED_REQUIRED_MOD_IDS.contains(modId)) {
+                warnings.add(missingModWarning(modId, discovered));
+            }
+            if (!entry.getValue().enabled() && !entry.getValue().locked() && discovered.containsKey(modId)) {
+                if (Objects.equals(desiredByMod.get(modId), true)) {
+                    List<String> dependents = enabledDependents(discovered, desiredByMod, modId);
+                    if (!dependents.isEmpty()) {
+                        warnings.add(disabledDependencyWarning(modId, dependents));
+                    }
+                }
+                List<String> siblings = enabledSiblingModIds(discovered, desiredByMod, modId);
+                if (!siblings.isEmpty()) {
+                    warnings.add(disabledBundledModWarning(modId, siblings));
+                }
+            }
+        }
+        return warnings;
+    }
+
+    private static List<String> enabledDependents(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, String requiredModId) {
+        List<String> dependents = new ArrayList<>();
+        for (Map.Entry<String, Boolean> entry : desiredByMod.entrySet()) {
+            String modId = entry.getKey();
+            if (!Objects.equals(entry.getValue(), true) || modId.equals(requiredModId)) {
+                continue;
+            }
+
+            ModJar jar = discovered.get(modId);
+            if (jar != null && jar.requiredModIds().contains(requiredModId)) {
+                dependents.add(modId);
+            }
+        }
+        dependents.sort(String.CASE_INSENSITIVE_ORDER);
+        return dependents;
+    }
+
+    private static List<String> enabledSiblingModIds(Map<String, ModJar> discovered, Map<String, Boolean> desiredByMod, String modId) {
+        ModJar jar = discovered.get(modId);
+        if (jar == null) {
+            return List.of();
+        }
+
+        List<String> siblings = new ArrayList<>();
+        for (String siblingId : jar.modIds()) {
+            if (!siblingId.equals(modId) && Objects.equals(desiredByMod.get(siblingId), true)) {
+                siblings.add(siblingId);
+            }
+        }
+        siblings.sort(String.CASE_INSENSITIVE_ORDER);
+        return siblings;
+    }
+
+    private static String disabledDependencyWarning(String modId, List<String> dependents) {
+        String verb = dependents.size() == 1 ? "requires" : "require";
+        return "profile disables " + modId + ", but it will stay enabled because " + String.join(", ", dependents) + " " + verb + " it";
+    }
+
+    private static String disabledBundledModWarning(String modId, List<String> siblings) {
+        String label = siblings.size() == 1 ? "enabled mod id " : "enabled mod ids ";
+        return "profile disables " + modId + ", but its jar will stay enabled because the same jar also provides " + label + String.join(", ", siblings);
+    }
+
+    private static String lockedBundledModError(String modId, List<String> siblings) {
+        String label = siblings.size() == 1 ? "enabled mod id " : "enabled mod ids ";
+        return "profile locks " + modId + " disabled, but the same jar also provides " + label + String.join(", ", siblings);
+    }
+
+    private static String missingModWarning(String modId, Map<String, ModJar> discovered) {
+        List<String> suggestions = relatedModSuggestions(modId, discovered);
+        if (suggestions.isEmpty()) {
+            return "profile enables " + modId + ", but no matching jar is installed";
+        }
+        return "profile enables " + modId + ", but no matching jar is installed; closest discovered: " + String.join(", ", suggestions);
+    }
+
+    private static List<String> relatedModSuggestions(String modId, Map<String, ModJar> discovered) {
+        String query = compactIdentity(modId);
+        Set<String> queryTokens = identityTokens(modId);
+        List<Suggestion> suggestions = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (Map.Entry<String, ModJar> entry : discovered.entrySet()) {
+            String text = entry.getKey() + " (" + entry.getValue().path().getFileName() + ")";
+            if (!seen.add(text)) {
+                continue;
+            }
+
+            int score = relationScore(query, queryTokens, entry.getKey(), entry.getValue().path().getFileName().toString());
+            if (score > 0) {
+                suggestions.add(new Suggestion(text, score));
+            }
+        }
+
+        suggestions.sort((left, right) -> {
+            int score = Integer.compare(right.score(), left.score());
+            return score == 0 ? left.text().compareTo(right.text()) : score;
+        });
+        return suggestions.stream().limit(3).map(Suggestion::text).toList();
+    }
+
+    private static int relationScore(String query, Set<String> queryTokens, String... values) {
+        int score = 0;
+        for (String value : values) {
+            String compact = compactIdentity(value);
+            if (!compact.isBlank() && (query.contains(compact) || compact.contains(query))) {
+                score += 8;
+            }
+            Set<String> valueTokens = identityTokens(value);
+            valueTokens.retainAll(queryTokens);
+            score += valueTokens.size() * 2;
+        }
+        return score;
+    }
+
+    private static String compactIdentity(String value) {
+        return value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "");
+    }
+
+    private static Set<String> identityTokens(String value) {
+        Set<String> ignored = Set.of("jar", "disabled", "forge", "neoforge", "mc", "mod", "mr");
+        Set<String> tokens = new LinkedHashSet<>();
+        for (String token : value.toLowerCase(Locale.ROOT).split("[^a-z0-9]+")) {
+            if (token.length() > 1 && !token.chars().allMatch(Character::isDigit) && !ignored.contains(token)) {
+                tokens.add(token);
+            }
+        }
+        return tokens;
+    }
+
+    private record Suggestion(String text, int score) {
     }
 
     private static Set<String> lockedDisabledModIds(Map<String, ModJar> discovered, QualityProfile profile) {
