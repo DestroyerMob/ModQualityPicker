@@ -44,6 +44,11 @@ public final class QualityRuntime {
             Files.createDirectories(ProfilePaths.presetsRoot());
             ConfigFileManager.captureMissingDefaultConfigFiles(ProfilePaths.gameDirectory());
 
+            if (Files.isRegularFile(ProfilePaths.pendingProfile())) {
+                ModQualityPicker.LOGGER.info("Found a pending Mod Quality Picker profile from an earlier session; scheduling deferred application");
+                DeferredProfileApplier.start();
+            }
+
             if (ModQualityPickerConfig.WRITE_LAUNCH_SNAPSHOT.get()) {
                 RuntimeSelection selection = currentSelection();
                 PROFILE_STORE.writeSelection(ProfilePaths.activeSelection(), selection);
@@ -250,6 +255,7 @@ public final class QualityRuntime {
         QualityProfile resolvedProfile = withRequiredDependencies(profile);
         PROFILE_STORE.writePendingProfile(ProfilePaths.pendingProfile(), PendingProfileChange.of(resolvedProfile, selection, reason, sourceWorldId));
         PROFILE_STORE.writeQualitySelection(ProfilePaths.pendingSelection(), selection);
+        DeferredProfileApplier.start();
         ModQualityPicker.LOGGER.info("Queued Mod Quality Picker profile '{}' for the pre-launch applier", profile.id());
     }
 

@@ -29,11 +29,11 @@ This project now contains:
 - Automatic world-open mismatch checks through a client-side mixin.
 - A three-choice world mismatch screen: continue current, queue world profile, or back out.
 - Config file hashing plus replace-file and simple TOML merge application.
-- A transactional, self-contained Java pre-launch applier inside the normal mod jar.
+- A transactional, self-contained Java applier inside the normal mod jar, launched automatically when changes are queued.
 
 ## Runtime Boundary
 
-Mods are enabled or disabled during launch. This mod should not try to unload mods from inside a running game. Instead, it records the desired profile, prompts the player when a world needs a different profile, and queues the change for a restart/pre-launch applier.
+Mods are enabled or disabled between launches. This mod does not try to unload mods from inside a running game. Instead, it records the desired profile, prompts the player when a world needs a different profile, and starts a helper that waits for Minecraft to exit before applying the queue.
 
 ## In-Game Editor
 
@@ -82,17 +82,21 @@ Run:
 
 The runtime jar will be created under `build/libs/`.
 
-## Prism Pre-Launch
+## Automatic Apply After Exit
 
 When the in-game UI queues a profile, it writes `minecraft/config/modqualitypicker/pending-profile.json`.
 
-The built mod jar is executable as a standalone Java tool. Run the same jar installed in the instance before launching Minecraft:
+The mod starts a small helper process from its own executable jar. The helper waits for the current Minecraft process to exit, then applies the queued mod and config changes before the next launch. This is launcher-independent and requires no player setup.
+
+## Optional Standalone Recovery
+
+The built mod jar is also executable as a standalone Java tool. Pack developers may run it directly for diagnostics or recovery:
 
 ```sh
 java -jar /path/to/instance/minecraft/mods/modqualitypicker-local.jar apply --instance-root /path/to/Prism/instance
 ```
 
-No Python installation, source checkout, or separate helper is required at runtime. The jar renames mods between `.jar` and `.jar.disabled`, applies config overlays and world diffs, updates `activeProfileId`, and archives the pending selection as `applied-profile.json`.
+No Python installation, source checkout, separate helper download, or launcher configuration is required at runtime. The jar renames mods between `.jar` and `.jar.disabled`, applies config overlays and world diffs, updates `activeProfileId`, and archives the pending selection as `applied-profile.json`.
 Before any files are changed, it validates the selected profile and refuses hard dependency conflicts, such as enabling a mod while locking one of its required dependencies disabled.
 Validation output includes `DEPENDENCY` lines for auto-enabled requirements and suggests the closest discovered mod id/jar when a profile contains a stale fallback id.
 
@@ -108,7 +112,7 @@ To validate a saved preset directly:
 java -jar modqualitypicker-local.jar validate-profile --instance-root /path/to/Prism/instance --profile-id balanced
 ```
 
-The legacy Python utility in `tools/` remains optional for pack-developer maintenance operations such as catalog reconciliation and baseline capture. It is not used by the player UI or Prism pre-launch flow.
+The legacy Python utility in `tools/` remains optional for pack-developer maintenance operations such as catalog reconciliation and baseline capture. It is not used by the player UI, automatic helper, or launcher safety-net flow.
 
 When installed jars change, reconcile a saved preset with the discovered catalog before shipping it:
 
@@ -170,17 +174,17 @@ The common config tracks the active profile, whether launch snapshots are writte
 
 ## Minecraft Beyond Integration
 
-Minecraft Beyond bundles curated profiles, feature groups, and feature config overlays under `pack/config/modqualitypicker/` and treats those files as packwiz-managed config. Its Prism instance executes `modqualitypicker-local.jar` as a pre-launch command, so an in-game queued selection is applied before NeoForge discovers mods on the next launch. The `scripts/modpack` workflow also preserves the local active profile when packwiz updates the instance, re-applies jar enable/disable state after local mod syncing, and can promote in-instance preset edits back into the distributable pack with:
+Minecraft Beyond bundles curated profiles, feature groups, and feature config overlays under `pack/config/modqualitypicker/` and treats those files as packwiz-managed config. Queued changes use the mod's automatic deferred helper, while the `scripts/modpack` workflow preserves the local active profile when packwiz updates the instance, re-applies jar enable/disable state after local mod syncing, and can promote in-instance preset edits back into the distributable pack with:
 
 ```sh
 ./scripts/modpack sync-quality-presets --profile <profile-id>
 ```
 
-The mod repository owns profile semantics and the pre-launch applier; the pack repository owns the shipped preset contents.
+The mod repository owns profile semantics and the automatic/standalone applier; the pack repository owns the shipped preset contents.
 
 ## Known Limitations
 
-- Runtime mod unloading is intentionally out of scope; mod enable/disable changes require a restart and launcher pre-launch command.
+- Runtime mod unloading is intentionally out of scope; mod enable/disable changes take effect after Minecraft exits and the instance is launched again.
 - Very large config files fall back to a simpler prefix/suffix diff to avoid excessive memory use.
 - Structured TOML/JSON-aware diffs are still future work; current diffs are line-oriented and validated against their baseline before application.
-- Installing the Prism pre-launch command remains the responsibility of each pack or launcher instance; the mod does not rewrite launcher settings.
+- A pending queue found on a later startup is automatically scheduled again, covering helper-start failures and upgrades from older releases.

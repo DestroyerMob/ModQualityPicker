@@ -10,6 +10,8 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Pure-JDK executable entry point. The NeoForge side never calls this class.
@@ -32,6 +34,8 @@ public final class BootstrapLauncher {
     }
 
     static int run(String[] args) throws Exception {
+        LaunchArguments launchArguments = parseLaunchArguments(args);
+        waitForProcess(launchArguments.waitForPid());
         Path self = executableJar();
         Path gson = extractGson();
         URL[] urls = {self.toUri().toURL(), gson.toUri().toURL()};
@@ -42,7 +46,7 @@ public final class BootstrapLauncher {
             try {
                 Class<?> runner = Class.forName(RUNNER_CLASS, true, loader);
                 Method method = runner.getMethod("run", String[].class);
-                return (int) method.invoke(null, (Object) args);
+                return (int) method.invoke(null, (Object) launchArguments.runnerArguments());
             } catch (InvocationTargetException exception) {
                 Throwable cause = exception.getCause();
                 if (cause instanceof Exception checked) {
@@ -58,6 +62,35 @@ public final class BootstrapLauncher {
         } finally {
             Files.deleteIfExists(gson);
         }
+    }
+
+    private record LaunchArguments(long waitForPid, String[] runnerArguments) {
+    }
+
+    private static LaunchArguments parseLaunchArguments(String[] args) {
+        long waitForPid = -1;
+        List<String> runnerArguments = new ArrayList<>();
+        for (int index = 0; index < args.length; index++) {
+            if ("--wait-for-pid".equals(args[index])) {
+                if (index + 1 >= args.length) {
+                    throw new IllegalArgumentException("--wait-for-pid requires a process id");
+                }
+                waitForPid = Long.parseLong(args[++index]);
+            } else {
+                runnerArguments.add(args[index]);
+            }
+        }
+        return new LaunchArguments(waitForPid, runnerArguments.toArray(String[]::new));
+    }
+
+    private static void waitForProcess(long processId) {
+        if (processId < 0) {
+            return;
+        }
+        if (processId == ProcessHandle.current().pid()) {
+            throw new IllegalArgumentException("Cannot wait for the applier's own process id");
+        }
+        ProcessHandle.of(processId).ifPresent(process -> process.onExit().join());
     }
 
     private static Path executableJar() throws IOException, URISyntaxException {

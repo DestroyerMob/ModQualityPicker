@@ -270,6 +270,15 @@ def bootstrapApplySmokeTest = tasks.register("bootstrapApplySmokeTest", JavaExec
     mainClass = "org.destroyermob.modqualitypicker.bootstrap.BootstrapApplySmoke"
 }
 
+def deferredBootstrapSmokeTest = tasks.register("deferredBootstrapSmokeTest", JavaExec) {
+    dependsOn tasks.named("jar"), tasks.named("testClasses")
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = "org.destroyermob.modqualitypicker.bootstrap.DeferredBootstrapSmoke"
+    doFirst {
+        setArgs([tasks.named("jar", Jar).get().archiveFile.get().asFile.absolutePath])
+    }
+}
+
 tasks.named("test", Test).configure {
     failOnNoDiscoveredTests = false
 }
@@ -286,7 +295,7 @@ def selfContainedJarSmokeTest = tasks.register("selfContainedJarSmokeTest", Exec
 }
 
 tasks.named("check").configure {
-    dependsOn qualityModelSmokeTest, bootstrapApplySmokeTest, selfContainedJarSmokeTest
+    dependsOn qualityModelSmokeTest, bootstrapApplySmokeTest, deferredBootstrapSmokeTest, selfContainedJarSmokeTest
 }
 
 idea {

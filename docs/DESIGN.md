@@ -8,7 +8,7 @@ Mod Quality Picker is a pack-developer tool for shipping multiple performance an
 - `feature-groups.json` defines independent, pack-owned quality axes. Each choice can contribute mod states and config rules without replacing unrelated choices.
 - A player selection stores a base profile id plus only the feature overrides that differ from that base.
 - The current launch writes `config/modqualitypicker/active-selection.json`.
-- Pending changes are written to `config/modqualitypicker/pending-selection.json` for the launcher/pre-launch applier to consume.
+- Pending changes are written to `config/modqualitypicker/pending-selection.json`; a helper spawned from the mod jar waits for Minecraft to exit and then consumes them.
 - Generated config defaults live under `config/modqualitypicker/defaults`.
 - Default metadata lives in `config/modqualitypicker/defaults-manifest.json`.
 - Presets store config changes as unified diffs under `config/modqualitypicker/presets/<profile>/...`.
@@ -45,7 +45,7 @@ Profile order is stored in `sortOrder`. The Profiles tab can move presets up or 
 - World-list mismatch prompt.
 - Config file hashing, default manifest validation, legacy TOML merge support, and default-plus-diff config application.
 - Profile validation that refuses locked-disabled dependencies required by enabled mods, reports dependency auto-enables, and suggests matching discovered jar ids for stale profile entries.
-- Transactional pre-launch applier packaged in the normal mod jar, with no Python/runtime sidecar dependency.
+- Transactional standalone applier packaged in the normal mod jar, with an automatically spawned deferred helper and no Python/runtime sidecar dependency.
 - Composable feature-group resolution with base defaults and per-player overrides.
 - Player-facing current/desired/disabled mod inspection and restart/new-world requirements.
 - Preflight validation that rejects missing or malformed profile/world config layers before any jars are renamed.
@@ -57,4 +57,4 @@ Profile order is stored in `sortOrder`. The Profiles tab can move presets up or 
 
 - Add a clean throwaway-launch workflow for refreshing default baselines when mods update their generated config format.
 - Add richer option widgets for numeric and non-cyclic pack-defined settings.
-- Add a launcher-agnostic installer for pre-launch hooks; individual packs currently own that launcher configuration.
+- Re-schedule any pending queue found at startup so helper-start failures and upgrades from older releases recover without launcher integration.
