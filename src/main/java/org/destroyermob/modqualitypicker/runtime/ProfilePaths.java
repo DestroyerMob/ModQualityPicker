@@ -22,6 +22,10 @@ public final class ProfilePaths {
         return instanceRoot().resolve("presets");
     }
 
+    public static Path featureGroups() {
+        return instanceRoot().resolve("feature-groups.json");
+    }
+
     public static Path defaultsRoot() {
         return instanceRoot().resolve("defaults");
     }

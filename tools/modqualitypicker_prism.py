@@ -45,6 +45,12 @@ SUPPORTED_CONFIG_SUFFIXES = (
     ".ini",
     ".txt",
 )
+SUPPORTED_CONFIG_MODES = {
+    "APPLY_DIFF",
+    "KEEP_PLAYER",
+    "MERGE_TOML",
+    "REPLACE_FILE",
+}
 
 
 @dataclass(frozen=True)
@@ -169,10 +175,13 @@ def resolve_profile_for_apply(paths: InstancePaths, pending: dict | None) -> tup
         return profile, pending_record(profile_with_required_dependencies(paths, profile), "active-profile", "")
 
     profile_id = profile_id_from_pending(pending)
-    try:
-        _, profile = load_profile(paths, profile_id)
-    except SystemExit:
+    if pending.get("reason") == "world-profile":
         profile = profile_from_pending(pending)
+    else:
+        try:
+            _, profile = load_profile(paths, profile_id)
+        except SystemExit:
+            profile = profile_from_pending(pending)
 
     return profile, pending_record(profile_with_required_dependencies(paths, profile), pending.get("reason", "queued-profile"), pending.get("sourceWorldId", ""))
 
@@ -689,19 +698,126 @@ def apply_config_files(paths: InstancePaths, profile: dict, dry_run: bool) -> li
             baseline = resolve_inside(paths.mod_config_dir, f"{DEFAULTS_ROOT}/{relative_path}")
             diff = resolve_inside(paths.mod_config_dir, preset_file)
             if not baseline.exists():
-                actions[-1] = f"missing default config baseline {relative_path}"
-                continue
+                raise SystemExit(f"Missing default config baseline: {relative_path}")
+            if not diff.exists():
+                raise SystemExit(f"Missing config diff: {preset_file}")
             apply_config_diff(target, baseline, diff)
         else:
             source = resolve_inside(paths.mod_config_dir, preset_file)
             if not source.exists():
-                actions[-1] = f"missing config preset {preset_file}"
-                continue
+                raise SystemExit(f"Missing config preset: {preset_file}")
             if mode == "MERGE_TOML":
                 merge_toml_overlay(target, source)
             else:
                 shutil.copy2(source, target)
     return actions
+
+
+def validate_config_application(
+    paths: InstancePaths,
+    pending: dict,
+    profile: dict,
+    world_id: str | None,
+) -> list[str]:
+    errors: list[str] = []
+    config_files = profile.get("configFiles", [])
+    if not isinstance(config_files, list):
+        return ["profile configFiles is not an array"]
+
+    for index, item in enumerate(config_files):
+        label = f"configFiles[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{label} is not an object")
+            continue
+
+        relative_path = item.get("path", "")
+        mode = item.get("mode", "REPLACE_FILE")
+        preset_file = item.get("presetFile", "") or relative_path
+        if not isinstance(relative_path, str) or not relative_path:
+            errors.append(f"{label} has no path")
+            continue
+        if not isinstance(mode, str) or mode not in SUPPORTED_CONFIG_MODES:
+            errors.append(f"{relative_path} uses unsupported config mode {mode}")
+            continue
+        if not isinstance(preset_file, str) or not preset_file:
+            errors.append(f"{relative_path} has an invalid presetFile")
+            continue
+        if mode == "KEEP_PLAYER":
+            continue
+
+        try:
+            target = resolve_inside(paths.game_dir, relative_path)
+            if mode == "APPLY_DIFF":
+                baseline = resolve_inside(paths.mod_config_dir, f"{DEFAULTS_ROOT}/{relative_path}")
+                diff = resolve_inside(paths.mod_config_dir, preset_file)
+                if not baseline.is_file():
+                    errors.append(f"missing default config baseline {relative_path}")
+                    continue
+                if not diff.is_file():
+                    errors.append(f"missing config diff {preset_file}")
+                    continue
+                apply_unified_diff(read_lines(baseline), read_lines(diff))
+            else:
+                source = resolve_inside(paths.mod_config_dir, preset_file)
+                if not source.is_file():
+                    errors.append(f"missing config preset {preset_file}")
+                    continue
+                if mode == "MERGE_TOML":
+                    collect_toml_entries(read_lines(source))
+                elif mode == "REPLACE_FILE":
+                    source.stat()
+        except (OSError, UnicodeError, SystemExit) as exception:
+            errors.append(f"invalid config rule {relative_path}: {exception}")
+
+    errors.extend(validate_world_config_application(paths, pending, profile, world_id))
+    return errors
+
+
+def validate_world_config_application(
+    paths: InstancePaths,
+    pending: dict,
+    profile: dict,
+    world_id: str | None,
+) -> list[str]:
+    selected_world_id = world_id or pending.get("sourceWorldId", "")
+    if not selected_world_id:
+        return []
+
+    manifest_path = paths.world_diff_manifest(selected_world_id)
+    if not manifest_path.exists():
+        return []
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exception:
+        return [f"invalid world config manifest {selected_world_id}: {exception}"]
+
+    entries = manifest.get("entries", {}) if isinstance(manifest, dict) else None
+    if not isinstance(entries, dict):
+        return [f"world config manifest {selected_world_id} has invalid entries"]
+
+    errors: list[str] = []
+    world_mod_dir = paths.world_mod_dir(selected_world_id)
+    for relative_path, entry in sorted(entries.items()):
+        if not isinstance(relative_path, str) or not relative_path or not isinstance(entry, dict):
+            errors.append(f"world config manifest {selected_world_id} has an invalid entry")
+            continue
+        diff_file = entry.get("diffFile", "")
+        if not isinstance(diff_file, str) or not diff_file:
+            errors.append(f"world config entry {selected_world_id}:{relative_path} has no diffFile")
+            continue
+
+        try:
+            target = resolve_inside(paths.game_dir, relative_path)
+            diff = resolve_inside(world_mod_dir, diff_file)
+            if not diff.is_file():
+                errors.append(f"missing world config diff {selected_world_id}:{relative_path}")
+                continue
+            base_lines = render_profile_config_lines(paths, profile, relative_path, target)
+            apply_unified_diff(base_lines, read_lines(diff))
+        except (OSError, UnicodeError, SystemExit) as exception:
+            errors.append(f"invalid world config diff {selected_world_id}:{relative_path}: {exception}")
+    return errors
 
 
 def capture_default_configs(paths: InstancePaths, force: bool, dry_run: bool) -> list[str]:
@@ -859,8 +975,7 @@ def apply_world_config_diffs(paths: InstancePaths, pending: dict, profile: dict,
         target = resolve_inside(paths.game_dir, relative_path)
         diff = resolve_inside(world_mod_dir, diff_file)
         if not diff.exists():
-            actions.append(f"missing world config diff {selected_world_id}:{relative_path}")
-            continue
+            raise SystemExit(f"Missing world config diff: {selected_world_id}:{relative_path}")
 
         actions.append(f"world_diff {selected_world_id}:{relative_path}")
         if dry_run:
@@ -910,6 +1025,61 @@ def profile_config_items(profile: dict) -> list[dict]:
     if not isinstance(existing, list):
         return []
     return [item for item in existing if isinstance(item, dict)]
+
+
+def sync_profile_mods(
+    paths: InstancePaths,
+    profile_id: str,
+    new_mod_state: str,
+    prune_missing: bool,
+    dry_run: bool,
+) -> list[str]:
+    profile_path, profile = load_profile(paths, profile_id)
+    existing = profile.get("mods", {})
+    if not isinstance(existing, dict):
+        raise SystemExit(f"Profile {profile_id} mods is not an object")
+
+    discovered = discover_mod_jars(paths.mods_dir)
+    updated = copy.deepcopy(existing)
+    actions: list[str] = []
+    for mod_id, jar in sorted(discovered.items()):
+        if mod_id in updated:
+            continue
+        enabled = profile_sync_enabled_state(jar, new_mod_state)
+        updated[mod_id] = {
+            "enabled": enabled,
+            "locked": mod_id == MOD_ID,
+            "reason": "Detected from the installed mod catalog.",
+        }
+        actions.append(f"add {mod_id} = {'enabled' if enabled else 'disabled'}")
+
+    if prune_missing:
+        preserved = IGNORED_REQUIRED_MOD_IDS | {MOD_ID}
+        for mod_id in sorted(set(updated) - set(discovered) - preserved):
+            del updated[mod_id]
+            actions.append(f"remove missing {mod_id}")
+
+    modquality_state = updated.get(MOD_ID)
+    if not isinstance(modquality_state, dict) or not bool(modquality_state.get("enabled", True)) or not bool(modquality_state.get("locked", False)):
+        updated[MOD_ID] = {
+            "enabled": True,
+            "locked": True,
+            "reason": "Required by Mod Quality Picker.",
+        }
+        actions.append(f"lock {MOD_ID} enabled")
+
+    if not dry_run and actions:
+        profile["mods"] = updated
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+    return actions
+
+
+def profile_sync_enabled_state(jar: ModJar, new_mod_state: str) -> bool:
+    if new_mod_state == "enabled":
+        return True
+    if new_mod_state == "disabled":
+        return False
+    return not jar.path.name.endswith(".jar.disabled")
 
 
 def list_config_files(paths: InstancePaths) -> list[str]:
@@ -1262,6 +1432,12 @@ def apply_pending(args: argparse.Namespace) -> int:
     if plan.errors:
         return 1
 
+    config_errors = validate_config_application(paths, applied, profile, args.world_id)
+    for error in config_errors:
+        print(f"ERROR {error}")
+    if config_errors:
+        return 1
+
     actions = []
     actions.extend(apply_mod_states(paths, profile, args.dry_run, plan))
     actions.extend(apply_config_files(paths, profile, args.dry_run))
@@ -1281,11 +1457,13 @@ def apply_pending(args: argparse.Namespace) -> int:
 
 def validate_profile(args: argparse.Namespace) -> int:
     paths = InstancePaths.from_root(Path(args.instance_root))
+    pending = None
     if args.profile_id:
         _, profile = load_profile(paths, args.profile_id)
+        pending = pending_record(profile, "validate-profile", "")
     else:
         pending = load_pending_profile(paths)
-        profile, _ = resolve_profile_for_apply(paths, pending)
+        profile, pending = resolve_profile_for_apply(paths, pending)
 
     if profile is None:
         print(f"No pending profile found and no active preset found for {active_profile_id(paths)}.")
@@ -1294,6 +1472,12 @@ def validate_profile(args: argparse.Namespace) -> int:
     plan = resolve_mod_plan(paths, profile)
     print_validation(plan)
     if plan.errors:
+        return 1
+    assert pending is not None
+    config_errors = validate_config_application(paths, pending, profile, None)
+    for error in config_errors:
+        print(f"ERROR {error}")
+    if config_errors:
         return 1
     if not plan.warnings:
         print(f"Profile {profile.get('id', 'balanced')} is valid.")
@@ -1358,6 +1542,16 @@ def capture_world(args: argparse.Namespace) -> int:
     return 0
 
 
+def sync_profile(args: argparse.Namespace) -> int:
+    paths = InstancePaths.from_root(Path(args.instance_root))
+    actions = sync_profile_mods(paths, args.profile_id, args.new_mod_state, args.prune_missing, args.dry_run)
+    for action in actions:
+        print(action)
+    if not actions:
+        print(f"Profile {args.profile_id} already matches the installed mod catalog.")
+    return 0
+
+
 def validate_defaults(args: argparse.Namespace) -> int:
     paths = InstancePaths.from_root(Path(args.instance_root))
     problems = validate_default_manifest(paths)
@@ -1412,6 +1606,19 @@ def build_parser() -> argparse.ArgumentParser:
     world_diffs.add_argument("--capture-missing-defaults", action="store_true", help="Create missing baselines from the live config before diffing.")
     world_diffs.add_argument("--dry-run", action="store_true")
     world_diffs.set_defaults(func=capture_world)
+
+    sync_mods = subparsers.add_parser("sync-profile-mods", help="Reconcile a saved profile with the installed mod jar catalog.")
+    sync_mods.add_argument("--instance-root", default=".", help="Prism instance root or game directory.")
+    sync_mods.add_argument("--profile-id", required=True)
+    sync_mods.add_argument(
+        "--new-mod-state",
+        choices=("current", "enabled", "disabled"),
+        default="current",
+        help="State assigned to newly discovered mods; current follows each jar's enabled/disabled filename.",
+    )
+    sync_mods.add_argument("--prune-missing", action="store_true", help="Remove profile entries with no installed jar, except platform ids.")
+    sync_mods.add_argument("--dry-run", action="store_true")
+    sync_mods.set_defaults(func=sync_profile)
 
     validate = subparsers.add_parser("validate-defaults", help="Check default config baselines against the manifest.")
     validate.add_argument("--instance-root", default=".", help="Prism instance root or game directory.")

@@ -3,7 +3,6 @@ package org.destroyermob.modqualitypicker.runtime;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import org.destroyermob.modqualitypicker.ModQualityPicker;
 import org.destroyermob.modqualitypicker.profile.ModState;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
 
@@ -31,9 +30,12 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public final class ModJarCatalog {
+    private static final String MOD_ID = "modqualitypicker";
+    private static final System.Logger LOGGER = System.getLogger(ModJarCatalog.class.getName());
     private static final Pattern MOD_HEADER = Pattern.compile("^\\s*\\[\\[mods]]\\s*(?:#.*)?$");
     private static final Pattern DEPENDENCY_HEADER = Pattern.compile("^\\s*\\[\\[dependencies\\.[^]]+]]\\s*(?:#.*)?$");
-    private static final Pattern TOML_STRING_VALUE = Pattern.compile("^\\s*([A-Za-z0-9_.-]+)\\s*=\\s*\"([^\"]*)\"\\s*(?:#.*)?$");
+    private static final Pattern TOML_STRING_VALUE = Pattern.compile("^\\s*([A-Za-z0-9_.-]+)\\s*=\\s*(['\"])(.*?)\\2\\s*(?:#.*)?$");
+    private static final Pattern INLINE_MOD_ID = Pattern.compile("\\bmodId\\s*=\\s*(['\"])([^'\"]+)\\1");
     private static final Pattern TOML_BOOLEAN_VALUE = Pattern.compile("^\\s*([A-Za-z0-9_.-]+)\\s*=\\s*(true|false)\\s*(?:#.*)?$", Pattern.CASE_INSENSITIVE);
     private static final int MAX_NESTED_JAR_DEPTH = 3;
     private static final Set<String> IGNORED_REQUIRED_MOD_IDS = Set.of(
@@ -45,6 +47,37 @@ public final class ModJarCatalog {
     );
 
     public record ModJar(Path path, Set<String> modIds, Set<String> requiredModIds) {
+    }
+
+    public enum JarOperationType {
+        DELETE,
+        MOVE,
+        MOVE_REPLACE
+    }
+
+    public record JarOperation(JarOperationType type, Path source, Path target, String action) {
+        public JarOperation {
+            Objects.requireNonNull(type, "type");
+            Objects.requireNonNull(source, "source");
+            action = action == null ? "" : action;
+        }
+
+        public Set<Path> affectedPaths() {
+            return target == null ? Set.of(source) : Set.of(source, target);
+        }
+    }
+
+    public record JarPlan(List<String> dependencyActions, List<JarOperation> operations) {
+        public JarPlan {
+            dependencyActions = dependencyActions == null ? List.of() : List.copyOf(dependencyActions);
+            operations = operations == null ? List.of() : List.copyOf(operations);
+        }
+
+        public List<String> actions() {
+            List<String> actions = new ArrayList<>(dependencyActions);
+            operations.stream().map(JarOperation::action).forEach(actions::add);
+            return List.copyOf(actions);
+        }
     }
 
     public enum DisableStrategy {
@@ -108,7 +141,7 @@ public final class ModJarCatalog {
                     .distinct()
                     .forEach(jar -> discovered.addAll(jar.modIds()));
         } catch (IOException exception) {
-            ModQualityPicker.LOGGER.warn("Could not discover Mod Quality Picker jar catalog in {}", modsDirectory, exception);
+            LOGGER.log(System.Logger.Level.WARNING, "Could not discover Mod Quality Picker jar catalog in " + modsDirectory, exception);
         }
         return discovered;
     }
@@ -149,10 +182,15 @@ public final class ModJarCatalog {
     }
 
     public static List<String> applyProfile(Path gameDirectory, QualityProfile profile) throws IOException {
+        JarPlan plan = planProfileChanges(gameDirectory, profile);
+        applyJarOperations(plan.operations());
+        return plan.actions();
+    }
+
+    public static JarPlan planProfileChanges(Path gameDirectory, QualityProfile profile) throws IOException {
         ResolvedProfile resolved = resolveProfile(gameDirectory, profile);
         Map<String, ModJar> discovered = resolved.discovered();
         Map<String, Boolean> desiredByMod = resolved.desiredByMod();
-        List<String> actions = new ArrayList<>(resolved.actions());
 
         Map<Path, Boolean> desiredByJar = new HashMap<>();
         for (Map.Entry<String, Boolean> entry : desiredByMod.entrySet()) {
@@ -163,39 +201,60 @@ public final class ModJarCatalog {
             desiredByJar.merge(jar.path(), entry.getValue(), Boolean::logicalOr);
         }
 
-        for (Map.Entry<Path, Boolean> entry : desiredByJar.entrySet()) {
+        List<JarOperation> operations = new ArrayList<>();
+        for (Map.Entry<Path, Boolean> entry : desiredByJar.entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
             Path jar = entry.getKey();
             boolean enabled = entry.getValue();
             String fileName = jar.getFileName().toString();
             if (enabled && fileName.endsWith(".jar.disabled")) {
                 Path target = jar.resolveSibling(fileName.substring(0, fileName.length() - ".disabled".length()));
                 if (Files.exists(target)) {
-                    actions.add("enable " + fileName + " already satisfied by " + target.getFileName() + "; removing duplicate disabled copy");
-                    Files.delete(jar);
+                    operations.add(new JarOperation(
+                            JarOperationType.DELETE,
+                            jar,
+                            null,
+                            "enable " + fileName + " already satisfied by " + target.getFileName() + "; removing duplicate disabled copy"
+                    ));
                 } else {
-                    actions.add("enable " + fileName + " -> " + target.getFileName());
-                    Files.move(jar, target);
+                    operations.add(new JarOperation(JarOperationType.MOVE, jar, target, "enable " + fileName + " -> " + target.getFileName()));
                 }
             } else if (enabled && fileName.endsWith(".jar")) {
                 Path duplicateDisabled = jar.resolveSibling(fileName + ".disabled");
                 if (Files.exists(duplicateDisabled)) {
-                    actions.add("enable " + fileName + " already satisfied; removing duplicate disabled copy " + duplicateDisabled.getFileName());
-                    Files.delete(duplicateDisabled);
+                    operations.add(new JarOperation(
+                            JarOperationType.DELETE,
+                            duplicateDisabled,
+                            null,
+                            "enable " + fileName + " already satisfied; removing duplicate disabled copy " + duplicateDisabled.getFileName()
+                    ));
                 }
             } else if (!enabled && fileName.endsWith(".jar")) {
                 Path target = jar.resolveSibling(fileName + ".disabled");
-                actions.add("disable " + fileName + " -> " + target.getFileName());
-                Files.move(jar, target, StandardCopyOption.REPLACE_EXISTING);
+                operations.add(new JarOperation(JarOperationType.MOVE_REPLACE, jar, target, "disable " + fileName + " -> " + target.getFileName()));
             } else if (!enabled && fileName.endsWith(".jar.disabled")) {
                 Path duplicateEnabled = jar.resolveSibling(fileName.substring(0, fileName.length() - ".disabled".length()));
                 if (Files.exists(duplicateEnabled)) {
-                    actions.add("disable " + fileName + " already satisfied; removing duplicate enabled copy " + duplicateEnabled.getFileName());
-                    Files.delete(duplicateEnabled);
+                    operations.add(new JarOperation(
+                            JarOperationType.DELETE,
+                            duplicateEnabled,
+                            null,
+                            "disable " + fileName + " already satisfied; removing duplicate enabled copy " + duplicateEnabled.getFileName()
+                    ));
                 }
             }
         }
 
-        return actions;
+        return new JarPlan(resolved.actions(), operations);
+    }
+
+    public static void applyJarOperations(List<JarOperation> operations) throws IOException {
+        for (JarOperation operation : operations) {
+            switch (operation.type()) {
+                case DELETE -> Files.deleteIfExists(operation.source());
+                case MOVE -> Files.move(operation.source(), operation.target());
+                case MOVE_REPLACE -> Files.move(operation.source(), operation.target(), StandardCopyOption.REPLACE_EXISTING);
+            }
+        }
     }
 
     public static QualityProfile withRequiredDependencies(Path gameDirectory, QualityProfile profile) throws IOException {
@@ -206,7 +265,7 @@ public final class ModJarCatalog {
             String modId = entry.getKey();
             ModState current = mods.get(modId);
             if (entry.getValue() && current == null) {
-                mods.put(modId, new ModState(true, modId.equals(ModQualityPicker.MOD_ID), requiredReason(modId, resolved.actions())));
+                mods.put(modId, new ModState(true, modId.equals(MOD_ID), requiredReason(modId, resolved.actions())));
             } else if (entry.getValue() && !current.enabled()) {
                 mods.put(modId, new ModState(true, true, requiredReason(modId, resolved.actions())));
             }
@@ -220,7 +279,8 @@ public final class ModJarCatalog {
                 profile.description(),
                 mods,
                 profile.configFiles(),
-                profile.options()
+                profile.options(),
+                profile.featureChoices()
         );
     }
 
@@ -270,7 +330,7 @@ public final class ModJarCatalog {
         for (Map.Entry<String, ModState> entry : profile.mods().entrySet()) {
             desiredByMod.put(entry.getKey(), entry.getValue().enabled());
         }
-        desiredByMod.put(ModQualityPicker.MOD_ID, true);
+        desiredByMod.put(MOD_ID, true);
 
         Set<String> lockedDisabledModIds = lockedDisabledModIds(discovered, profile);
         actions.addAll(enableRequiredDependencies(discovered, desiredByMod, lockedDisabledModIds));
@@ -378,7 +438,7 @@ public final class ModJarCatalog {
     }
 
     private static void addDisableReason(Map<String, String> reasons, String modId, String reason) {
-        if (modId == null || modId.isBlank() || modId.equals(ModQualityPicker.MOD_ID)) {
+        if (modId == null || modId.isBlank() || modId.equals(MOD_ID)) {
             return;
         }
         reasons.putIfAbsent(modId, reason);
@@ -418,7 +478,7 @@ public final class ModJarCatalog {
         List<String> warnings = new ArrayList<>();
         for (Map.Entry<String, ModState> entry : profile.mods().entrySet()) {
             String modId = entry.getKey();
-            if (entry.getValue().enabled() && !discovered.containsKey(modId) && !modId.equals(ModQualityPicker.MOD_ID) && !IGNORED_REQUIRED_MOD_IDS.contains(modId)) {
+            if (entry.getValue().enabled() && !discovered.containsKey(modId) && !modId.equals(MOD_ID) && !IGNORED_REQUIRED_MOD_IDS.contains(modId)) {
                 warnings.add(missingModWarning(modId, discovered));
             }
             if (!entry.getValue().enabled() && !entry.getValue().locked() && discovered.containsKey(modId)) {
@@ -569,7 +629,7 @@ public final class ModJarCatalog {
                 return "Required because " + action.substring(prefix.length()) + ".";
             }
         }
-        if (modId.equals(ModQualityPicker.MOD_ID)) {
+        if (modId.equals(MOD_ID)) {
             return "Required by Mod Quality Picker.";
         }
         return "Required by an enabled mod.";
@@ -742,12 +802,29 @@ public final class ModJarCatalog {
 
             Matcher stringMatcher = TOML_STRING_VALUE.matcher(line);
             if (stringMatcher.matches()) {
-                block.put(stringMatcher.group(1), stringMatcher.group(2));
+                block.put(stringMatcher.group(1), stringMatcher.group(3));
             }
         }
 
         if (inMod) {
             addNeoForgeModId(ids, block);
+        }
+        boolean inInlineMods = false;
+        for (String line : metadata.split("\\R")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("mods") && trimmed.contains("[")) {
+                inInlineMods = true;
+            }
+            if (!inInlineMods) {
+                continue;
+            }
+            Matcher inline = INLINE_MOD_ID.matcher(line);
+            while (inline.find()) {
+                ids.add(inline.group(2));
+            }
+            if (trimmed.contains("]")) {
+                inInlineMods = false;
+            }
         }
         return ids;
     }
@@ -801,7 +878,7 @@ public final class ModJarCatalog {
 
             Matcher stringMatcher = TOML_STRING_VALUE.matcher(line);
             if (stringMatcher.matches()) {
-                block.put(stringMatcher.group(1), stringMatcher.group(2));
+                block.put(stringMatcher.group(1), stringMatcher.group(3));
                 continue;
             }
 

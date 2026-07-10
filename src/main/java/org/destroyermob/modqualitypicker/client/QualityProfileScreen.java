@@ -864,6 +864,7 @@ public final class QualityProfileScreen extends Screen {
                 "Created from scratch.",
                 Map.of(),
                 List.of(),
+                Map.of(),
                 Map.of()
         );
 
@@ -882,7 +883,8 @@ public final class QualityProfileScreen extends Screen {
                 "Copied from " + source.displayName() + ".",
                 source.mods(),
                 source.configFiles(),
-                source.options()
+                source.options(),
+                source.featureChoices()
         );
 
         writeCreatedProfile(Component.translatable("modqualitypicker.message.profile_duplicated", source.displayName(), this.draft.displayName()));
@@ -1209,7 +1211,7 @@ public final class QualityProfileScreen extends Screen {
 
     private QualityProfile copyProfile(String id, String displayName, Map<String, ModState> mods, List<ConfigFileOverride> configs, Map<String, ProfileOption> options) {
         String normalizedId = id == null || id.isBlank() ? this.draft.id() : id;
-        return new QualityProfile(QualityProfile.SCHEMA_VERSION, normalizedId, displayName, this.draft.sortOrder(), this.draft.description(), mods, configs, options);
+        return new QualityProfile(QualityProfile.SCHEMA_VERSION, normalizedId, displayName, this.draft.sortOrder(), this.draft.description(), mods, configs, options, this.draft.featureChoices());
     }
 
     private void setModSearchText(String value) {

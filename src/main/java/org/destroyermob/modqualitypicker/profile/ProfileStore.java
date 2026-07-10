@@ -10,6 +10,7 @@ import java.io.Reader;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Optional;
 
 public final class ProfileStore {
@@ -37,6 +38,22 @@ public final class ProfileStore {
 
     public void writeSelection(Path path, RuntimeSelection selection) throws IOException {
         write(path, selection);
+    }
+
+    public Optional<QualitySelection> readQualitySelection(Path path) throws IOException {
+        return read(path, QualitySelection.class);
+    }
+
+    public void writeQualitySelection(Path path, QualitySelection selection) throws IOException {
+        write(path, selection);
+    }
+
+    public Optional<QualityPackDefinition> readPackDefinition(Path path) throws IOException {
+        return read(path, QualityPackDefinition.class);
+    }
+
+    public void writePackDefinition(Path path, QualityPackDefinition definition) throws IOException {
+        write(path, definition);
     }
 
     public Optional<PendingProfileChange> readPendingProfile(Path path) throws IOException {
@@ -67,9 +84,15 @@ public final class ProfileStore {
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        try (Writer writer = Files.newBufferedWriter(path)) {
+        Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
+        try (Writer writer = Files.newBufferedWriter(temporary)) {
             gson.toJson(value, writer);
             writer.write(System.lineSeparator());
+        }
+        try {
+            Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.nio.file.AtomicMoveNotSupportedException exception) {
+            Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 }

@@ -3,7 +3,6 @@ package org.destroyermob.modqualitypicker.configfile;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonParseException;
-import org.destroyermob.modqualitypicker.ModQualityPicker;
 import org.destroyermob.modqualitypicker.profile.ConfigFileOverride;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
 import org.destroyermob.modqualitypicker.runtime.ProfilePaths;
@@ -29,6 +28,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 public final class ConfigFileManager {
+    private static final String MOD_ID = "modqualitypicker";
     private static final Pattern SECTION = Pattern.compile("^\\s*\\[([^\\[\\]]+)]\\s*(?:#.*)?$");
     private static final Pattern KEY_VALUE = Pattern.compile("^\\s*([A-Za-z0-9_.-]+)\\s*=\\s*(.+)$");
     private static final String DEFAULTS_ROOT = "defaults";
@@ -77,6 +77,10 @@ public final class ConfigFileManager {
     }
 
     public static void applyProfileConfigFiles(Path gameDirectory, QualityProfile profile) throws IOException {
+        applyProfileConfigFiles(gameDirectory, ProfilePaths.instanceRoot(), profile);
+    }
+
+    public static void applyProfileConfigFiles(Path gameDirectory, Path profileRoot, QualityProfile profile) throws IOException {
         for (ConfigFileOverride configFile : profile.configFiles()) {
             if (configFile.path().isBlank() || configFile.mode() == ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER) {
                 continue;
@@ -89,21 +93,71 @@ public final class ConfigFileManager {
             }
 
             if (configFile.mode() == ConfigFileOverride.ConfigApplyMode.APPLY_DIFF) {
-                applyDiffConfigFile(target, configFile);
+                applyDiffConfigFile(target, profileRoot, configFile);
             } else if (configFile.mode() == ConfigFileOverride.ConfigApplyMode.MERGE_TOML) {
-                Path preset = resolvePreset(configFile);
+                Path preset = resolvePreset(profileRoot, configFile);
                 if (!Files.isRegularFile(preset)) {
-                    continue;
+                    throw new IOException("Missing config preset: " + configFile.presetFile());
                 }
                 mergeTomlOverlay(target, preset);
             } else {
-                Path preset = resolvePreset(configFile);
+                Path preset = resolvePreset(profileRoot, configFile);
                 if (!Files.isRegularFile(preset)) {
-                    continue;
+                    throw new IOException("Missing config preset: " + configFile.presetFile());
                 }
                 Files.copy(preset, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
             }
         }
+    }
+
+    public static List<String> validateProfileConfigFiles(Path gameDirectory, Path profileRoot, QualityProfile profile) {
+        List<String> errors = new ArrayList<>();
+        for (ConfigFileOverride configFile : profile.configFiles()) {
+            if (configFile.path().isBlank()) {
+                errors.add("Config entry has no path");
+                continue;
+            }
+            if (configFile.mode() == ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER) {
+                continue;
+            }
+
+            try {
+                resolveInside(gameDirectory, configFile.path());
+                if (configFile.mode() == ConfigFileOverride.ConfigApplyMode.APPLY_DIFF) {
+                    Path baseline = resolveDefault(profileRoot, configFile.path());
+                    Path diff = resolvePreset(profileRoot, configFile);
+                    if (!Files.isRegularFile(baseline)) {
+                        errors.add("Missing default config baseline: " + configFile.path());
+                        continue;
+                    }
+                    if (!Files.isRegularFile(diff)) {
+                        errors.add("Missing config diff: " + configFile.presetFile());
+                        continue;
+                    }
+                    UnifiedConfigDiff.apply(Files.readAllLines(baseline), Files.readAllLines(diff));
+                } else {
+                    Path preset = resolvePreset(profileRoot, configFile);
+                    if (!Files.isRegularFile(preset)) {
+                        errors.add("Missing config preset: " + configFile.presetFile());
+                    } else if (configFile.mode() == ConfigFileOverride.ConfigApplyMode.MERGE_TOML) {
+                        collectTomlEntries(Files.readAllLines(preset));
+                    }
+                }
+            } catch (IOException | IllegalArgumentException exception) {
+                errors.add("Invalid config rule " + configFile.path() + ": " + exception.getMessage());
+            }
+        }
+        return List.copyOf(errors);
+    }
+
+    public static List<Path> configTargetPaths(Path gameDirectory, QualityProfile profile) {
+        List<Path> paths = new ArrayList<>();
+        for (ConfigFileOverride configFile : profile.configFiles()) {
+            if (!configFile.path().isBlank() && configFile.mode() != ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER) {
+                paths.add(resolveInside(gameDirectory, configFile.path()));
+            }
+        }
+        return List.copyOf(paths);
     }
 
     public static List<String> listConfigFiles(Path gameDirectory) {
@@ -191,12 +245,20 @@ public final class ConfigFileManager {
     }
 
     private static Path resolvePreset(ConfigFileOverride configFile) {
+        return resolvePreset(ProfilePaths.instanceRoot(), configFile);
+    }
+
+    private static Path resolvePreset(Path profileRoot, ConfigFileOverride configFile) {
         String presetFile = configFile.presetFile().isBlank() ? configFile.path() : configFile.presetFile();
-        return resolveInside(ProfilePaths.instanceRoot(), presetFile);
+        return resolveInside(profileRoot, presetFile);
     }
 
     private static Path resolveDefault(String relativePath) {
-        return resolveInside(ProfilePaths.instanceRoot(), DEFAULTS_ROOT + "/" + relativePath);
+        return resolveDefault(ProfilePaths.instanceRoot(), relativePath);
+    }
+
+    private static Path resolveDefault(Path profileRoot, String relativePath) {
+        return resolveInside(profileRoot, DEFAULTS_ROOT + "/" + relativePath);
     }
 
     private static Path captureDefaultConfigFileIfMissing(Path gameDirectory, String relativePath) throws IOException {
@@ -274,15 +336,18 @@ public final class ConfigFileManager {
         return dot > 0 ? first.substring(0, dot) : first;
     }
 
-    private static void applyDiffConfigFile(Path target, ConfigFileOverride configFile) throws IOException {
-        Path baseline = resolveDefault(configFile.path());
+    private static void applyDiffConfigFile(Path target, Path profileRoot, ConfigFileOverride configFile) throws IOException {
+        Path baseline = resolveDefault(profileRoot, configFile.path());
         if (!Files.isRegularFile(baseline)) {
             throw new IOException("Missing default config baseline: " + configFile.path());
         }
 
         List<String> baseLines = Files.readAllLines(baseline);
-        Path diff = resolvePreset(configFile);
-        List<String> diffLines = Files.isRegularFile(diff) ? Files.readAllLines(diff) : List.of();
+        Path diff = resolvePreset(profileRoot, configFile);
+        if (!Files.isRegularFile(diff)) {
+            throw new IOException("Missing config diff: " + configFile.presetFile());
+        }
+        List<String> diffLines = Files.readAllLines(diff);
         Files.write(target, UnifiedConfigDiff.apply(baseLines, diffLines));
     }
 
@@ -302,7 +367,7 @@ public final class ConfigFileManager {
 
     private static boolean isManagedConfigFile(Path configRoot, Path path) {
         String relative = configRoot.relativize(path).toString().replace('\\', '/');
-        return relative.equals(ModQualityPicker.MOD_ID) || relative.startsWith(ModQualityPicker.MOD_ID + "/");
+        return relative.equals(MOD_ID) || relative.startsWith(MOD_ID + "/");
     }
 
     private static void mergeTomlOverlay(Path target, Path overlay) throws IOException {

@@ -4,7 +4,9 @@ Mod Quality Picker is a pack-developer tool for shipping multiple performance an
 
 ## Core Model
 
-- A quality profile is a named preset with an explicit `sortOrder`, mod states, config file rules, and exposed player options.
+- A base profile is a named preset with an explicit `sortOrder`, mod states, config file rules, and default feature choices.
+- `feature-groups.json` defines independent, pack-owned quality axes. Each choice can contribute mod states and config rules without replacing unrelated choices.
+- A player selection stores a base profile id plus only the feature overrides that differ from that base.
 - The current launch writes `config/modqualitypicker/active-selection.json`.
 - Pending changes are written to `config/modqualitypicker/pending-selection.json` for the launcher/pre-launch applier to consume.
 - Generated config defaults live under `config/modqualitypicker/defaults`.
@@ -22,13 +24,13 @@ When the world profile differs from the current launch, the UI should offer:
 2. Use the world's profile, write it as pending, and restart the instance.
 3. Back out to the world list.
 
-The implementation avoids altering loaded mods in-process. Enabling and disabling mods is handled by the Prism helper before NeoForge completes mod discovery on the next launch.
+The implementation avoids altering loaded mods in-process. Enabling and disabling mods is handled by the executable mod jar before NeoForge completes mod discovery on the next launch.
 
 ## Pack Developer Flow
 
-Players can open `Options -> Pack Quality` to cycle through the pack's ordered quality presets. Choosing a preset writes it as pending and asks for a restart instead of trying to unload or load mods in-process.
+Players can open `Options -> Pack Quality` to select a base preset and independently cycle through player-adjustable feature groups. The screen resolves the final mod set immediately for inspection, but queues changes for the next launch instead of trying to unload or load mods in-process.
 
-Pack developers can open the Mod Quality Picker screen from the mod list/config menu or `/modqualitypicker open`. The editor is intentionally tabbed:
+Pack developers can open the detailed editor from the player screen or `/modqualitypicker developer`. The editor is intentionally tabbed:
 
 - `Profiles` handles profile switching, saving, capture, queueing, and exporting.
 - `Mods` shows a scrollable list of loaded mod ids and handles enabled/disabled state, locked state, and override removal.
@@ -43,12 +45,16 @@ Profile order is stored in `sortOrder`. The Profiles tab can move presets up or 
 - World-list mismatch prompt.
 - Config file hashing, default manifest validation, legacy TOML merge support, and default-plus-diff config application.
 - Profile validation that refuses locked-disabled dependencies required by enabled mods, reports dependency auto-enables, and suggests matching discovered jar ids for stale profile entries.
-- Pre-launch applier for Prism Launcher instances.
+- Transactional pre-launch applier packaged in the normal mod jar, with no Python/runtime sidecar dependency.
+- Composable feature-group resolution with base defaults and per-player overrides.
+- Player-facing current/desired/disabled mod inspection and restart/new-world requirements.
+- Preflight validation that rejects missing or malformed profile/world config layers before any jars are renamed.
+- Profile/catalog reconciliation for adding newly installed mods and pruning stale entries.
 - Pack export command that copies defaults and presets into the pack root.
 - Helper smoke tests for default capture and preset/world diff layering.
 
 ## Next Hardening Pass
 
 - Add a clean throwaway-launch workflow for refreshing default baselines when mods update their generated config format.
-- Add richer option widgets for arbitrary pack-defined profile settings.
-- Add launcher documentation for running the Prism helper automatically before instance launch.
+- Add richer option widgets for numeric and non-cyclic pack-defined settings.
+- Add a launcher-agnostic installer for pre-launch hooks; individual packs currently own that launcher configuration.

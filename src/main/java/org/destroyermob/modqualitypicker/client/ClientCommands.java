@@ -12,14 +12,20 @@ public final class ClientCommands {
         event.getDispatcher().register(
                 Commands.literal("modqualitypicker")
                         .then(Commands.literal("open").executes(context -> openScreen()))
+                        .then(Commands.literal("developer").executes(context -> openDeveloperScreen()))
                         .executes(context -> openScreen())
         );
     }
 
     private static int openScreen() {
         Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> minecraft.setScreen(new PlayerQualityScreen(minecraft.screen)));
+        return 1;
+    }
+
+    private static int openDeveloperScreen() {
+        Minecraft minecraft = Minecraft.getInstance();
         minecraft.execute(() -> minecraft.setScreen(new QualityProfileScreen(minecraft.screen)));
         return 1;
     }
 }
-

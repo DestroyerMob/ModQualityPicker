@@ -15,9 +15,10 @@ public record QualityProfile(
         String description,
         Map<String, ModState> mods,
         List<ConfigFileOverride> configFiles,
-        Map<String, ProfileOption> options
+        Map<String, ProfileOption> options,
+        Map<String, String> featureChoices
 ) {
-    public static final int SCHEMA_VERSION = 1;
+    public static final int SCHEMA_VERSION = 2;
 
     public QualityProfile {
         schemaVersion = schemaVersion <= 0 ? SCHEMA_VERSION : schemaVersion;
@@ -28,18 +29,32 @@ public record QualityProfile(
         mods = immutableMap(mods);
         configFiles = immutableList(configFiles);
         options = immutableMap(options);
+        featureChoices = immutableMap(featureChoices);
+    }
+
+    public QualityProfile(
+            int schemaVersion,
+            String id,
+            String displayName,
+            int sortOrder,
+            String description,
+            Map<String, ModState> mods,
+            List<ConfigFileOverride> configFiles,
+            Map<String, ProfileOption> options
+    ) {
+        this(schemaVersion, id, displayName, sortOrder, description, mods, configFiles, options, Map.of());
     }
 
     public static QualityProfile empty(String id, String displayName) {
-        return new QualityProfile(SCHEMA_VERSION, id, displayName, 0, "", Map.of(), List.of(), Map.of());
+        return new QualityProfile(SCHEMA_VERSION, id, displayName, 0, "", Map.of(), List.of(), Map.of(), Map.of());
     }
 
     public QualityProfile withSortOrder(int sortOrder) {
-        return new QualityProfile(schemaVersion, id, displayName, sortOrder, description, mods, configFiles, options);
+        return new QualityProfile(schemaVersion, id, displayName, sortOrder, description, mods, configFiles, options, featureChoices);
     }
 
     public QualityProfile withDisplayName(String displayName) {
-        return new QualityProfile(schemaVersion, id, displayName, sortOrder, description, mods, configFiles, options);
+        return new QualityProfile(schemaVersion, id, displayName, sortOrder, description, mods, configFiles, options, featureChoices);
     }
 
     private static String normalizeId(String id) {

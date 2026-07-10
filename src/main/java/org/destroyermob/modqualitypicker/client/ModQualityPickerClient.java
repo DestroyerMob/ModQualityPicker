@@ -13,7 +13,7 @@ import java.util.function.Supplier;
 @Mod(value = ModQualityPicker.MOD_ID, dist = Dist.CLIENT)
 public final class ModQualityPickerClient {
     public ModQualityPickerClient(IEventBus modEventBus, ModContainer modContainer) {
-        Supplier<IConfigScreenFactory> screenFactory = () -> (container, parent) -> new QualityProfileScreen(parent);
+        Supplier<IConfigScreenFactory> screenFactory = () -> (container, parent) -> new PlayerQualityScreen(parent);
         modContainer.registerExtensionPoint(IConfigScreenFactory.class, screenFactory);
         NeoForge.EVENT_BUS.addListener(ClientCommands::register);
     }

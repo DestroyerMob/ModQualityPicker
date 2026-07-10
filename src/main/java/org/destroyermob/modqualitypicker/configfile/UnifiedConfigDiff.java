@@ -7,7 +7,7 @@ import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-final class UnifiedConfigDiff {
+public final class UnifiedConfigDiff {
     private static final int CONTEXT_LINES = 3;
     private static final int MAX_EXACT_DIFF_CELLS = 4_000_000;
     private static final Pattern HUNK_HEADER = Pattern.compile("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@.*$");
@@ -15,7 +15,7 @@ final class UnifiedConfigDiff {
     private UnifiedConfigDiff() {
     }
 
-    static List<String> create(String relativePath, List<String> baseLines, List<String> modifiedLines) {
+    public static List<String> create(String relativePath, List<String> baseLines, List<String> modifiedLines) {
         Objects.requireNonNull(relativePath, "relativePath");
         Objects.requireNonNull(baseLines, "baseLines");
         Objects.requireNonNull(modifiedLines, "modifiedLines");
@@ -54,7 +54,7 @@ final class UnifiedConfigDiff {
         return diff;
     }
 
-    static List<String> apply(List<String> baseLines, List<String> diffLines) throws IOException {
+    public static List<String> apply(List<String> baseLines, List<String> diffLines) throws IOException {
         Objects.requireNonNull(baseLines, "baseLines");
         Objects.requireNonNull(diffLines, "diffLines");
 

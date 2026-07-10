@@ -138,6 +138,37 @@ class PrismHelperConfigTests(unittest.TestCase):
         self.assertNotIn(f"config/{mqp.MOD_ID}/presets/ignored.json", manifest["entries"])
         self.assertFalse(mqp.validate_default_manifest(self.paths))
 
+    def test_sync_profile_mods_adds_current_state_and_prunes_stale_entries(self) -> None:
+        self.write_neoforge_mod_jar("enabled.jar", "enabled_mod")
+        self.write_neoforge_mod_jar("disabled.jar.disabled", "disabled_mod")
+        self.write_neoforge_mod_jar("modqualitypicker.jar", mqp.MOD_ID)
+        profile_path = self.write_profile("balanced")
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["mods"] = {
+            "enabled_mod": {"enabled": False, "locked": False, "reason": "preserve me"},
+            "minecraft": {"enabled": True, "locked": False, "reason": "platform"},
+            "stale_mod": {"enabled": True, "locked": False, "reason": "remove me"},
+        }
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+
+        actions = mqp.sync_profile_mods(
+            self.paths,
+            profile_id="balanced",
+            new_mod_state="current",
+            prune_missing=True,
+            dry_run=False,
+        )
+
+        synced = json.loads(profile_path.read_text(encoding="utf-8"))["mods"]
+        self.assertFalse(synced["enabled_mod"]["enabled"])
+        self.assertFalse(synced["disabled_mod"]["enabled"])
+        self.assertTrue(synced[mqp.MOD_ID]["enabled"])
+        self.assertTrue(synced[mqp.MOD_ID]["locked"])
+        self.assertIn("minecraft", synced)
+        self.assertNotIn("stale_mod", synced)
+        self.assertIn("add disabled_mod = disabled", actions)
+        self.assertIn("remove missing stale_mod", actions)
+
     def test_profile_and_world_diffs_layer_over_defaults(self) -> None:
         self.write_game_file("config/example.toml", "foo = 1\nbar = 2\n")
         self.write_profile("balanced")
@@ -337,6 +368,70 @@ class PrismHelperConfigTests(unittest.TestCase):
         self.assertFalse((self.mods_dir / "addon.jar.disabled").exists())
         applied = json.loads(self.paths.applied_profile.read_text(encoding="utf-8"))
         self.assertTrue(applied["profile"]["mods"]["addon"]["enabled"])
+
+    def test_world_profile_uses_queued_snapshot_instead_of_latest_saved_preset(self) -> None:
+        self.write_neoforge_mod_jar("addon.jar.disabled", "addon")
+        profile_path = self.write_profile("balanced")
+        saved_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        saved_profile["mods"] = {
+            "addon": {"enabled": False, "locked": False, "reason": "new pack default"},
+        }
+        profile_path.write_text(json.dumps(saved_profile, indent=2) + "\n", encoding="utf-8")
+
+        world_profile = dict(saved_profile)
+        world_profile["mods"] = {
+            "addon": {"enabled": True, "locked": False, "reason": "saved with this world"},
+        }
+        pending = {
+            "schemaVersion": 1,
+            "reason": "world-profile",
+            "sourceWorldId": "New World",
+            "queuedAt": "2026-01-01T00:00:00Z",
+            "profile": world_profile,
+        }
+        self.paths.pending_profile.write_text(json.dumps(pending, indent=2) + "\n", encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = mqp.apply_pending(argparse.Namespace(
+                instance_root=str(self.root),
+                dry_run=False,
+                keep_pending=False,
+                world_id="",
+            ))
+
+        self.assertEqual(result, 0)
+        self.assertTrue((self.mods_dir / "addon.jar").exists())
+        self.assertFalse((self.mods_dir / "addon.jar.disabled").exists())
+        applied = json.loads(self.paths.applied_profile.read_text(encoding="utf-8"))
+        self.assertTrue(applied["profile"]["mods"]["addon"]["enabled"])
+
+    def test_invalid_config_plan_does_not_mutate_mod_jars(self) -> None:
+        self.write_neoforge_mod_jar("addon.jar", "addon")
+        profile_path = self.write_profile("balanced")
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["mods"] = {
+            "addon": {"enabled": False, "locked": False, "reason": "test"},
+        }
+        profile["configFiles"] = [{
+            "path": "config/missing.toml",
+            "mode": "APPLY_DIFF",
+            "presetFile": "presets/balanced/config/missing.toml.diff",
+            "sha256": "",
+        }]
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            result = mqp.apply_pending(argparse.Namespace(
+                instance_root=str(self.root),
+                dry_run=False,
+                keep_pending=False,
+                world_id="",
+            ))
+
+        self.assertEqual(result, 1)
+        self.assertTrue((self.mods_dir / "addon.jar").exists())
+        self.assertFalse((self.mods_dir / "addon.jar.disabled").exists())
+        self.assertIn("ERROR missing default config baseline config/missing.toml", output.getvalue())
 
     def test_apply_clears_pending_profile_and_selection(self) -> None:
         self.write_profile("balanced")

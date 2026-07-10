@@ -4,12 +4,16 @@ import org.destroyermob.modqualitypicker.ModQualityPicker;
 import org.destroyermob.modqualitypicker.config.ModQualityPickerConfig;
 import org.destroyermob.modqualitypicker.configfile.ConfigFileManager;
 import org.destroyermob.modqualitypicker.profile.ConfigFileOverride;
+import org.destroyermob.modqualitypicker.profile.EffectiveQualitySelection;
 import org.destroyermob.modqualitypicker.profile.ModState;
 import org.destroyermob.modqualitypicker.profile.PendingProfileChange;
 import org.destroyermob.modqualitypicker.profile.ProfileOption;
 import org.destroyermob.modqualitypicker.profile.ProfileRepository;
 import org.destroyermob.modqualitypicker.profile.ProfileStore;
+import org.destroyermob.modqualitypicker.profile.QualityPackDefinition;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
+import org.destroyermob.modqualitypicker.profile.QualitySelection;
+import org.destroyermob.modqualitypicker.profile.QualitySelectionResolver;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -60,12 +64,8 @@ public final class QualityRuntime {
 
     public static Optional<QualityProfile> activeProfile() {
         String activeProfileId = ModQualityPickerConfig.activeProfileId();
-        Optional<QualityProfile> preset = PROFILE_REPOSITORY.findPreset(activeProfileId);
-        if (preset.isPresent()) {
-            return preset;
-        }
-        return appliedProfile()
-                .filter(profile -> profile.id().equals(activeProfileId));
+        Optional<QualityProfile> applied = appliedProfile().filter(profile -> profile.id().equals(activeProfileId));
+        return applied.isPresent() ? applied : PROFILE_REPOSITORY.findPreset(activeProfileId);
     }
 
     public static String activeProfileId() {
@@ -104,13 +104,50 @@ public final class QualityRuntime {
     }
 
     public static Optional<QualityProfile> appliedProfile() {
+        return appliedChange().map(PendingProfileChange::profile);
+    }
+
+    public static Optional<PendingProfileChange> appliedChange() {
         try {
-            return PROFILE_STORE.readPendingProfile(ProfilePaths.appliedProfile())
-                    .map(PendingProfileChange::profile);
+            return PROFILE_STORE.readPendingProfile(ProfilePaths.appliedProfile());
         } catch (IOException exception) {
             ModQualityPicker.LOGGER.warn("Could not read applied Mod Quality Picker profile", exception);
             return Optional.empty();
         }
+    }
+
+    public static Optional<PendingProfileChange> pendingChange() {
+        try {
+            return PROFILE_STORE.readPendingProfile(ProfilePaths.pendingProfile());
+        } catch (IOException exception) {
+            ModQualityPicker.LOGGER.warn("Could not read pending Mod Quality Picker profile", exception);
+            return Optional.empty();
+        }
+    }
+
+    public static QualityPackDefinition packDefinition() {
+        try {
+            return PROFILE_STORE.readPackDefinition(ProfilePaths.featureGroups()).orElseGet(QualityPackDefinition::empty);
+        } catch (IOException exception) {
+            ModQualityPicker.LOGGER.warn("Could not read Mod Quality Picker feature groups", exception);
+            return QualityPackDefinition.empty();
+        }
+    }
+
+    public static QualitySelection activeQualitySelection() {
+        return appliedChange()
+                .map(PendingProfileChange::selection)
+                .orElseGet(() -> QualitySelection.forBase(ModQualityPickerConfig.activeProfileId()));
+    }
+
+    public static Optional<QualitySelection> pendingQualitySelection() {
+        return pendingChange().map(PendingProfileChange::selection);
+    }
+
+    public static EffectiveQualitySelection resolveQualitySelection(QualitySelection selection) throws IOException {
+        QualityProfile base = PROFILE_REPOSITORY.findPreset(selection.baseProfileId())
+                .orElseThrow(() -> new IOException("Quality preset not found: " + selection.baseProfileId()));
+        return QualitySelectionResolver.resolve(base, packDefinition(), selection);
     }
 
     public static Optional<QualityProfile> findMatchingPreset(QualityProfile profile) throws IOException {
@@ -135,7 +172,8 @@ public final class QualityRuntime {
                 "Temporary profile captured from a world.",
                 source.mods(),
                 source.configFiles(),
-                source.options()
+                source.options(),
+                source.featureChoices()
         );
     }
 
@@ -173,11 +211,22 @@ public final class QualityRuntime {
                 "Captured from the currently loaded mod list.",
                 mods,
                 configFiles,
-                Map.<String, ProfileOption>of()
+                Map.<String, ProfileOption>of(),
+                activeProfile().map(QualityProfile::featureChoices).orElse(Map.of())
         );
     }
 
+    public static void queueQualitySelection(QualitySelection selection, String reason, String sourceWorldId) throws IOException {
+        EffectiveQualitySelection effective = resolveQualitySelection(selection);
+        queueResolvedProfile(effective.profile(), effective.selection(), reason, sourceWorldId);
+    }
+
     public static void queueProfileChange(QualityProfile profile, String reason, String sourceWorldId) throws IOException {
+        QualitySelection selection = new QualitySelection(QualitySelection.SCHEMA_VERSION, profile.id(), profile.featureChoices());
+        queueResolvedProfile(profile, selection, reason, sourceWorldId);
+    }
+
+    private static void queueResolvedProfile(QualityProfile profile, QualitySelection selection, String reason, String sourceWorldId) throws IOException {
         ProfileValidation validation = validateProfile(profile);
         if (validation.hasErrors()) {
             throw new IOException(validation.exceptionMessage(profile.displayName()));
@@ -189,19 +238,19 @@ public final class QualityRuntime {
             ModQualityPicker.LOGGER.info("Mod Quality Picker profile '{}' dependency: {}", profile.id(), action);
         }
 
-        QualityProfile resolvedProfile = withRequiredDependencies(profile);
-        PROFILE_STORE.writePendingProfile(ProfilePaths.pendingProfile(), PendingProfileChange.of(resolvedProfile, reason, sourceWorldId));
-        PROFILE_STORE.writeSelection(ProfilePaths.pendingSelection(), selectionFromProfile(resolvedProfile));
-        ConfigFileManager.applyProfileConfigFiles(ProfilePaths.gameDirectory(), resolvedProfile);
-        List<String> jarActions = prepareModJarsForProfile(resolvedProfile);
-        PROFILE_STORE.writePendingProfile(ProfilePaths.appliedProfile(), PendingProfileChange.of(resolvedProfile, "active-profile", sourceWorldId));
-        PROFILE_STORE.delete(ProfilePaths.pendingProfile());
-        PROFILE_STORE.delete(ProfilePaths.pendingSelection());
-        if (jarActions.isEmpty()) {
-            ModQualityPicker.LOGGER.info("Applied Mod Quality Picker profile '{}' for the next launch; mod jars already match", profile.id());
-        } else {
-            ModQualityPicker.LOGGER.info("Applied Mod Quality Picker profile '{}' for the next launch: {}", profile.id(), String.join(", ", jarActions));
+        List<String> configErrors = ConfigFileManager.validateProfileConfigFiles(
+                ProfilePaths.gameDirectory(),
+                ProfilePaths.instanceRoot(),
+                profile
+        );
+        if (!configErrors.isEmpty()) {
+            throw new IOException("Invalid config files for " + profile.displayName() + ": " + String.join("; ", configErrors));
         }
+
+        QualityProfile resolvedProfile = withRequiredDependencies(profile);
+        PROFILE_STORE.writePendingProfile(ProfilePaths.pendingProfile(), PendingProfileChange.of(resolvedProfile, selection, reason, sourceWorldId));
+        PROFILE_STORE.writeQualitySelection(ProfilePaths.pendingSelection(), selection);
+        ModQualityPicker.LOGGER.info("Queued Mod Quality Picker profile '{}' for the pre-launch applier", profile.id());
     }
 
     public static void writeWorldProfile(Path worldDirectory, QualityProfile profile) throws IOException {
@@ -241,17 +290,6 @@ public final class QualityRuntime {
             }
         });
         return enabled;
-    }
-
-    private static List<String> prepareModJarsForProfile(QualityProfile profile) throws IOException {
-        ProfileValidation validation = validateProfile(profile);
-        if (validation.hasErrors()) {
-            throw new IOException(validation.exceptionMessage(profile.displayName()));
-        }
-
-        QualityProfile resolvedProfile = withRequiredDependencies(profile);
-        writeActiveProfileConfig(resolvedProfile.id());
-        return ModJarCatalog.applyProfile(ProfilePaths.gameDirectory(), resolvedProfile);
     }
 
     private static void writeActiveProfileConfig(String profileId) throws IOException {

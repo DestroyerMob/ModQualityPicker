@@ -24,6 +24,17 @@ sourceSets.main.resources {
     exclude '**/.cache/**'
 }
 
+configurations {
+    bootstrapGson
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    from(configurations.bootstrapGson) {
+        into 'bootstrap-libs'
+        rename { 'gson.jar' }
+    }
+}
+
 repositories {
     maven {
         name = 'Fabric'
@@ -34,6 +45,9 @@ repositories {
 dependencies {
     annotationProcessor "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
     compileOnly "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
+    bootstrapGson("com.google.code.gson:gson:2.11.0") {
+        transitive = false
+    }
 }
 
 neoForge {
@@ -110,7 +124,8 @@ tasks.named('jar', Jar).configure {
                 'Implementation-Title'    : project.name,
                 'Implementation-Version'  : project.jar.archiveVersion,
                 'Implementation-Vendor'   : mod_authors,
-                'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
+                'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
+                'Main-Class'               : 'org.destroyermob.modqualitypicker.bootstrap.BootstrapLauncher'
         ])
     }
 }
@@ -241,6 +256,37 @@ tasks.named("jar", Jar).configure {
     from(layout.buildDirectory.file("tmp/compileJava/${mod_id}.refmap.json")) {
         into ""
     }
+}
+
+def qualityModelSmokeTest = tasks.register("qualityModelSmokeTest", JavaExec) {
+    dependsOn tasks.named("testClasses")
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = "org.destroyermob.modqualitypicker.profile.QualitySelectionResolverSmoke"
+}
+
+def bootstrapApplySmokeTest = tasks.register("bootstrapApplySmokeTest", JavaExec) {
+    dependsOn tasks.named("testClasses")
+    classpath = sourceSets.test.runtimeClasspath + configurations.bootstrapGson
+    mainClass = "org.destroyermob.modqualitypicker.bootstrap.BootstrapApplySmoke"
+}
+
+tasks.named("test", Test).configure {
+    failOnNoDiscoveredTests = false
+}
+
+def selfContainedJarSmokeTest = tasks.register("selfContainedJarSmokeTest", Exec) {
+    dependsOn tasks.named("jar")
+    def javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    commandLine javaLauncher.map { it.executablePath.asFile }.get(),
+            "-jar",
+            tasks.named("jar", Jar).flatMap { it.archiveFile }.get().asFile,
+            "version"
+}
+
+tasks.named("check").configure {
+    dependsOn qualityModelSmokeTest, bootstrapApplySmokeTest, selfContainedJarSmokeTest
 }
 
 idea {
