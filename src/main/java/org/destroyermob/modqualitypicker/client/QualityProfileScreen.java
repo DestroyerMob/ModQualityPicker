@@ -42,6 +42,8 @@ public final class QualityProfileScreen extends Screen {
     private static final int FOOTER_HEIGHT = 34;
     private static final int SEARCH_HEIGHT = 20;
     private static final int SEARCH_GAP = 8;
+    private static final int FILTER_BUTTON_GAP = 4;
+    private static final int FILTER_BUTTON_WIDTH = 82;
     private static final int PANEL_GAP = 10;
     private static final int STACKED_WIDTH = 360;
     private static final int DETAIL_INSET = 12;
@@ -58,6 +60,12 @@ public final class QualityProfileScreen extends Screen {
     private enum Tab {
         PROFILES,
         MODS
+    }
+
+    private enum ModVisibility {
+        ALL,
+        ENABLED,
+        DISABLED
     }
 
     private record ActionButton(Component label, Runnable action) {
@@ -80,6 +88,8 @@ public final class QualityProfileScreen extends Screen {
     private final List<String> filteredMods = new ArrayList<>();
     private final List<String> availableConfigs = new ArrayList<>();
     private final Map<String, String> modResolutionWarnings = new LinkedHashMap<>();
+    private final Map<String, Boolean> resolvedModStates = new LinkedHashMap<>();
+    private final Map<String, ModJarCatalog.ModInspection> modInspections = new LinkedHashMap<>();
     private final List<Button> modActionButtons = new ArrayList<>();
 
     private int selectedProfileIndex;
@@ -95,12 +105,14 @@ public final class QualityProfileScreen extends Screen {
     private Button queueButton;
     private Button modEnabledButton;
     private Button modLockedButton;
+    private Button modVisibilityButton;
     private boolean queueButtonShiftMode;
     private boolean draggingListScrollbar;
     private boolean draggingDetailScrollbar;
     private int listScrollbarGrabOffset;
     private int detailScrollbarGrabOffset;
     private String modSearchText = "";
+    private ModVisibility modVisibility = ModVisibility.ALL;
     private boolean catalogLoaded;
     private String activeProfileId = "balanced";
     private String activeProfileLabel = "Balanced";
@@ -130,6 +142,7 @@ public final class QualityProfileScreen extends Screen {
         this.queueButton = null;
         this.modEnabledButton = null;
         this.modLockedButton = null;
+        this.modVisibilityButton = null;
         this.modActionButtons.clear();
         this.draggingListScrollbar = false;
         this.draggingDetailScrollbar = false;
@@ -137,12 +150,21 @@ public final class QualityProfileScreen extends Screen {
         initTopControls();
 
         if (this.tab == Tab.MODS) {
-            this.modSearch = new EditBox(this.font, listX(), modSearchY(), listWidth(), SEARCH_HEIGHT, Component.translatable("modqualitypicker.editor.search_mods"));
+            int filterWidth = Math.min(FILTER_BUTTON_WIDTH, Math.max(54, listWidth() / 3));
+            int searchWidth = Math.max(1, listWidth() - filterWidth - FILTER_BUTTON_GAP);
+            this.modSearch = new EditBox(this.font, listX(), modSearchY(), searchWidth, SEARCH_HEIGHT, Component.translatable("modqualitypicker.editor.search_mods"));
             this.modSearch.setHint(Component.translatable("modqualitypicker.editor.search_mods"));
             this.modSearch.setMaxLength(80);
             this.modSearch.setValue(this.modSearchText);
             this.modSearch.setResponder(this::setModSearchText);
             this.addRenderableWidget(this.modSearch);
+            this.modVisibilityButton = addButton(
+                    modVisibilityLabel(),
+                    listX() + searchWidth + FILTER_BUTTON_GAP,
+                    modSearchY(),
+                    filterWidth,
+                    this::cycleModVisibility
+            );
         } else {
             this.modSearch = null;
         }
@@ -416,10 +438,14 @@ public final class QualityProfileScreen extends Screen {
             String modId = this.filteredMods.get(index);
             ModState state = modState(modId);
             String warning = this.modResolutionWarnings.get(modId);
-            String marker = warning == null ? state.enabled() ? "[ON] " : "[OFF] " : "[ON*] ";
+            boolean resolvedEnabled = resolvedModEnabled(modId);
+            String marker = resolvedEnabled ? state.enabled() ? "[ON] " : "[ON*] " : state.enabled() ? "[OFF*] " : "[OFF] ";
             String lock = state.locked() ? " locked" : "";
             drawString(guiGraphics, fit(marker + modId, width), x, y, warning == null ? primary : 0xFFE0A0);
-            drawString(guiGraphics, fit(warning == null ? stateDescription(state) + lock : Component.translatable("modqualitypicker.editor.mod_stays_loaded").getString(), width), x, y + 12, warning == null ? secondary : 0xE8C878);
+            String resolvedDescription = Component.translatable(
+                    resolvedEnabled ? "modqualitypicker.editor.resolved_enabled" : "modqualitypicker.editor.resolved_disabled"
+            ).getString();
+            drawString(guiGraphics, fit(warning == null ? resolvedDescription + lock : Component.translatable("modqualitypicker.editor.mod_stays_loaded").getString(), width), x, y + 12, warning == null ? secondary : 0xE8C878);
         }
     }
 
@@ -625,6 +651,37 @@ public final class QualityProfileScreen extends Screen {
             ModState state = modState(modId.get());
             List<Component> lines = new ArrayList<>();
             lines.add(Component.translatable("modqualitypicker.editor.mod_state", state.enabled(), state.locked()));
+            lines.add(Component.translatable(
+                    "modqualitypicker.editor.mod_resolved_state",
+                    Component.translatable(resolvedModEnabled(modId.get()) ? "modqualitypicker.editor.enabled" : "modqualitypicker.editor.disabled")
+            ));
+            ModJarCatalog.ModInspection inspection = this.modInspections.get(modId.get());
+            if (inspection != null) {
+                lines.add(Component.empty());
+                lines.add(Component.translatable("modqualitypicker.editor.jar_file", inspection.fileName()));
+                lines.add(Component.translatable(
+                        "modqualitypicker.editor.jar_disk_state",
+                        Component.translatable(inspection.jarCurrentlyEnabled() ? "modqualitypicker.editor.enabled" : "modqualitypicker.editor.disabled")
+                ));
+                lines.add(Component.translatable("modqualitypicker.editor.jar_provides", joinedOrNone(inspection.providedModIds())));
+                lines.add(Component.translatable("modqualitypicker.editor.jar_requires", joinedOrNone(inspection.requiredModIds())));
+                lines.add(Component.empty());
+                lines.add(Component.translatable("modqualitypicker.editor.jar_dependents", inspection.dependentJars().size()));
+                if (inspection.dependentJars().isEmpty()) {
+                    lines.add(Component.translatable("modqualitypicker.editor.jar_dependents_none"));
+                } else {
+                    for (ModJarCatalog.DependentJar dependent : inspection.dependentJars()) {
+                        lines.add(Component.translatable(
+                                "modqualitypicker.editor.jar_dependent_entry",
+                                dependent.fileName(),
+                                String.join(", ", dependent.modIds()),
+                                String.join(", ", dependent.requiredProvidedIds())
+                        ));
+                    }
+                }
+            } else {
+                lines.add(Component.translatable("modqualitypicker.editor.jar_unknown"));
+            }
             selectedModResolutionWarning(modId.get()).ifPresent(warning -> lines.add(Component.translatable("modqualitypicker.editor.mod_resolution_warning", warning)));
             lines.add(Component.translatable("modqualitypicker.editor.mod_position", this.selectedModIndex + 1, this.filteredMods.size()));
             lines.add(Component.translatable("modqualitypicker.editor.mod_hint"));
@@ -641,13 +698,16 @@ public final class QualityProfileScreen extends Screen {
 
     private void refreshModResolutionWarnings() {
         this.modResolutionWarnings.clear();
+        this.resolvedModStates.clear();
         try {
+            this.resolvedModStates.putAll(ModJarCatalog.resolveEnabledMods(ProfilePaths.gameDirectory(), this.draft));
             ProfileValidation validation = QualityRuntime.validateProfile(this.draft);
             for (String warning : validation.warnings()) {
                 disabledModIdFromWarning(warning).ifPresent(modId -> this.modResolutionWarnings.putIfAbsent(modId, warning));
             }
         } catch (IOException ignored) {
             this.modResolutionWarnings.clear();
+            this.draft.mods().forEach((modId, state) -> this.resolvedModStates.put(modId, state.enabled()));
         }
     }
 
@@ -702,6 +762,12 @@ public final class QualityProfileScreen extends Screen {
         if (!this.catalogLoaded) {
             this.catalogMods.clear();
             this.catalogMods.addAll(QualityRuntime.availableModIds(this.draft));
+            try {
+                this.modInspections.clear();
+                this.modInspections.putAll(ModJarCatalog.inspectMods(ProfilePaths.gameDirectory()));
+            } catch (IOException exception) {
+                this.status = Component.literal(exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage());
+            }
             this.catalogLoaded = true;
         }
 
@@ -1190,6 +1256,7 @@ public final class QualityProfileScreen extends Screen {
         this.draft = copyProfile(this.draft.id(), this.draft.displayName(), mods, this.draft.configFiles(), this.draft.options());
         this.status = Component.translatable("modqualitypicker.message.mod_updated", modId);
         refreshModResolutionWarnings();
+        applyModFilter(modId);
         this.detailScroll = 0;
         updateModActionButtons();
     }
@@ -1224,7 +1291,12 @@ public final class QualityProfileScreen extends Screen {
         this.filteredMods.clear();
         String query = this.modSearchText.trim().toLowerCase(Locale.ROOT);
         for (String modId : this.availableMods) {
-            if (query.isEmpty() || modId.toLowerCase(Locale.ROOT).contains(query)) {
+            boolean visibilityMatch = switch (this.modVisibility) {
+                case ALL -> true;
+                case ENABLED -> resolvedModEnabled(modId);
+                case DISABLED -> !resolvedModEnabled(modId);
+            };
+            if (visibilityMatch && matchesModSearch(modId, query)) {
                 this.filteredMods.add(modId);
             }
         }
@@ -1237,6 +1309,50 @@ public final class QualityProfileScreen extends Screen {
         }
         this.modScroll = Math.max(0, Math.min(this.modScroll, Math.max(0, this.filteredMods.size() - visibleRows())));
         updateModActionButtons();
+    }
+
+    private boolean matchesModSearch(String modId, String query) {
+        if (query.isEmpty() || modId.toLowerCase(Locale.ROOT).contains(query)) {
+            return true;
+        }
+        ModJarCatalog.ModInspection inspection = this.modInspections.get(modId);
+        if (inspection == null) {
+            return false;
+        }
+        if (inspection.fileName().toLowerCase(Locale.ROOT).contains(query)) {
+            return true;
+        }
+        return inspection.providedModIds().stream().anyMatch(id -> id.toLowerCase(Locale.ROOT).contains(query));
+    }
+
+    private void cycleModVisibility() {
+        String selected = selectedMod().orElse("");
+        this.modVisibility = switch (this.modVisibility) {
+            case ALL -> ModVisibility.ENABLED;
+            case ENABLED -> ModVisibility.DISABLED;
+            case DISABLED -> ModVisibility.ALL;
+        };
+        if (this.modVisibilityButton != null) {
+            this.modVisibilityButton.setMessage(modVisibilityLabel());
+        }
+        this.modScroll = 0;
+        applyModFilter(selected);
+    }
+
+    private Component modVisibilityLabel() {
+        return Component.translatable(switch (this.modVisibility) {
+            case ALL -> "modqualitypicker.editor.filter_all";
+            case ENABLED -> "modqualitypicker.editor.filter_enabled";
+            case DISABLED -> "modqualitypicker.editor.filter_disabled";
+        });
+    }
+
+    private boolean resolvedModEnabled(String modId) {
+        return this.resolvedModStates.getOrDefault(modId, modState(modId).enabled());
+    }
+
+    private String joinedOrNone(List<String> values) {
+        return values.isEmpty() ? Component.translatable("modqualitypicker.editor.none").getString() : String.join(", ", values);
     }
 
     private String profileNameFromInput(String fallback) {
@@ -1436,7 +1552,7 @@ public final class QualityProfileScreen extends Screen {
     private Component listTitle() {
         return switch (this.tab) {
             case PROFILES -> Component.translatable("modqualitypicker.editor.tab_profiles");
-            case MODS -> this.modSearchText.isBlank()
+            case MODS -> this.modSearchText.isBlank() && this.modVisibility == ModVisibility.ALL
                     ? Component.translatable("modqualitypicker.editor.tab_mods")
                     : Component.translatable("modqualitypicker.editor.tab_mods_filtered", this.filteredMods.size(), this.availableMods.size());
         };

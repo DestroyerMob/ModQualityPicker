@@ -114,6 +114,37 @@ java -jar modqualitypicker-local.jar validate-profile --instance-root /path/to/P
 
 The legacy Python utility in `tools/` remains optional for pack-developer maintenance operations such as catalog reconciliation and baseline capture. It is not used by the player UI, automatic helper, or launcher safety-net flow.
 
+### Conservative JAR cleanup
+
+The standalone/deferred applier also maintains `config/modqualitypicker/jar-cleaner-state.json`.
+It removes a JAR only when the same filename was previously recorded as pack-owned and
+is no longer present in current pack metadata. Unknown JARs are recorded as protected
+Prism/user additions and are never inferred to be stale. Files ending in
+`.jar.disabled` are outside cleanup scope.
+
+Pack ownership is read from `minecraft/packwiz.json`. Packs can declare local or
+otherwise externally managed build artifacts in
+`config/modqualitypicker/managed-jars.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "filenames": [
+    "example-local.jar"
+  ]
+}
+```
+
+An artifact ending in `.jar.duplicate` is removed only when its corresponding current
+pack-owned JAR exists and both files are byte-for-byte identical. Different versions
+are preserved with a warning. Cleanup runs automatically during `apply`, or can be
+previewed and run independently:
+
+```sh
+java -jar modqualitypicker-local.jar clean-jars --instance-root /path/to/Prism/instance --dry-run
+java -jar modqualitypicker-local.jar clean-jars --instance-root /path/to/Prism/instance
+```
+
 When installed jars change, reconcile a saved preset with the discovered catalog before shipping it:
 
 ```sh

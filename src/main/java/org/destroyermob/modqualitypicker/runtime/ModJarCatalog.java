@@ -49,6 +49,31 @@ public final class ModJarCatalog {
     public record ModJar(Path path, Set<String> modIds, Set<String> requiredModIds) {
     }
 
+    public record DependentJar(String fileName, List<String> modIds, List<String> requiredProvidedIds) {
+        public DependentJar {
+            fileName = fileName == null ? "" : fileName;
+            modIds = modIds == null ? List.of() : List.copyOf(modIds);
+            requiredProvidedIds = requiredProvidedIds == null ? List.of() : List.copyOf(requiredProvidedIds);
+        }
+    }
+
+    public record ModInspection(
+            String selectedModId,
+            String fileName,
+            boolean jarCurrentlyEnabled,
+            List<String> providedModIds,
+            List<String> requiredModIds,
+            List<DependentJar> dependentJars
+    ) {
+        public ModInspection {
+            selectedModId = selectedModId == null ? "" : selectedModId;
+            fileName = fileName == null ? "" : fileName;
+            providedModIds = providedModIds == null ? List.of() : List.copyOf(providedModIds);
+            requiredModIds = requiredModIds == null ? List.of() : List.copyOf(requiredModIds);
+            dependentJars = dependentJars == null ? List.of() : List.copyOf(dependentJars);
+        }
+    }
+
     public enum JarOperationType {
         DELETE,
         MOVE,
@@ -179,6 +204,54 @@ public final class ModJarCatalog {
         Map<String, ModJar> cached = Map.copyOf(discovered);
         catalogCache = new CatalogCache(modsDirectory, fingerprint, cached);
         return cached;
+    }
+
+    public static Map<String, ModInspection> inspectMods(Path gameDirectory) throws IOException {
+        Map<String, ModJar> discovered = discoverModJars(gameDirectory);
+        Map<String, ModInspection> inspections = new LinkedHashMap<>();
+        Set<ModJar> jars = new LinkedHashSet<>(discovered.values());
+        for (ModJar selectedJar : jars) {
+            List<String> providedIds = sortedIds(selectedJar.modIds());
+            List<String> requiredIds = sortedIds(selectedJar.requiredModIds());
+            List<DependentJar> dependents = new ArrayList<>();
+            for (ModJar candidate : jars) {
+                if (candidate.equals(selectedJar)) {
+                    continue;
+                }
+                Set<String> matched = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+                for (String requiredId : candidate.requiredModIds()) {
+                    if (selectedJar.modIds().contains(requiredId)) {
+                        matched.add(requiredId);
+                    }
+                }
+                if (!matched.isEmpty()) {
+                    dependents.add(new DependentJar(
+                            candidate.path().getFileName().toString(),
+                            sortedIds(candidate.modIds()),
+                            List.copyOf(matched)
+                    ));
+                }
+            }
+            dependents.sort((left, right) -> String.CASE_INSENSITIVE_ORDER.compare(left.fileName(), right.fileName()));
+            boolean enabled = selectedJar.path().getFileName().toString().endsWith(".jar");
+            for (String modId : selectedJar.modIds()) {
+                inspections.put(modId, new ModInspection(
+                        modId,
+                        selectedJar.path().getFileName().toString(),
+                        enabled,
+                        providedIds,
+                        requiredIds,
+                        dependents
+                ));
+            }
+        }
+        return Map.copyOf(inspections);
+    }
+
+    private static List<String> sortedIds(Set<String> ids) {
+        List<String> sorted = new ArrayList<>(ids);
+        sorted.sort(String.CASE_INSENSITIVE_ORDER);
+        return List.copyOf(sorted);
     }
 
     public static List<String> applyProfile(Path gameDirectory, QualityProfile profile) throws IOException {

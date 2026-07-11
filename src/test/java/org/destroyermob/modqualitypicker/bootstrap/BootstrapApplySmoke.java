@@ -11,6 +11,7 @@ import org.destroyermob.modqualitypicker.profile.ProfileStore;
 import org.destroyermob.modqualitypicker.profile.QualityPackDefinition;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
 import org.destroyermob.modqualitypicker.profile.QualitySelection;
+import org.destroyermob.modqualitypicker.runtime.ModJarCatalog;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -43,6 +44,7 @@ public final class BootstrapApplySmoke {
     }
 
     private static void runFixture(Path game) throws Exception {
+        runCleanerFixture(game.resolve("cleaner-fixture"));
         Path mods = Files.createDirectories(game.resolve("mods"));
         Path profileRoot = Files.createDirectories(game.resolve("config/modqualitypicker"));
         Path presets = Files.createDirectories(profileRoot.resolve("presets"));
@@ -52,6 +54,31 @@ public final class BootstrapApplySmoke {
         Files.writeString(game.resolve("config/ecology-common.toml"), "gameplayPreset = \"VANILLA_SAFE\"\n", StandardCharsets.UTF_8);
         Files.writeString(game.resolve("config/modqualitypicker-common.toml"), "activeProfileId = \"balanced\"\n", StandardCharsets.UTF_8);
         writeModJar(mods.resolve("ecology.jar.disabled"), "ecology");
+        writeModJarMetadata(mods.resolve("library-bundle.jar"), """
+                modLoader = "javafml"
+                [[mods]]
+                modId = "library_core"
+                version = "1"
+                [[mods]]
+                modId = "library_api"
+                version = "1"
+                """);
+        writeModJarMetadata(mods.resolve("consumer.jar"), """
+                modLoader = "javafml"
+                [[mods]]
+                modId = "consumer"
+                version = "1"
+                [[dependencies.consumer]]
+                modId = "library_core"
+                type = "required"
+                """);
+
+        ModJarCatalog.ModInspection inspection = ModJarCatalog.inspectMods(game).get("library_api");
+        require(inspection != null, "Bundled mod ID should have an inspection entry");
+        require(inspection.providedModIds().equals(List.of("library_api", "library_core")), "Inspection should expose all IDs in the selected jar");
+        require(inspection.dependentJars().size() == 1, "Inspection should group dependents by jar");
+        require(inspection.dependentJars().getFirst().modIds().equals(List.of("consumer")), "Inspection should identify the dependent mod jar");
+        require(inspection.dependentJars().getFirst().requiredProvidedIds().equals(List.of("library_core")), "Inspection should identify the provided ID used as the dependency");
 
         ConfigFileOverride ecologyConfig = new ConfigFileOverride(
                 "config/ecology-common.toml",
@@ -100,10 +127,60 @@ public final class BootstrapApplySmoke {
         require("max".equals(applied.selection().featureOverrides().get("ecology")), "Applied receipt should preserve feature overrides");
     }
 
+    private static void runCleanerFixture(Path game) throws Exception {
+        Path mods = Files.createDirectories(game.resolve("mods"));
+        Path profileRoot = Files.createDirectories(game.resolve("config/modqualitypicker"));
+        Path oldPackJar = mods.resolve("pack-old.jar");
+        Path prismJar = mods.resolve("prism-added.jar");
+        Path disabledJar = mods.resolve("leave-me.jar.disabled");
+        writeModJar(oldPackJar, "pack_old");
+        writeModJar(prismJar, "prism_added");
+        writeModJar(disabledJar, "disabled_mod");
+        writePackwizState(game, "pack-old.jar");
+
+        PackJarCleaner.CleanupPlan initial = PackJarCleaner.plan(game, profileRoot);
+        require(initial.deletePaths().isEmpty(), "First cleanup pass must not delete unknown Prism jars");
+        PackJarCleaner.apply(initial);
+
+        Path newPackJar = mods.resolve("pack-new.jar");
+        Path duplicate = mods.resolve("pack-new.jar.duplicate");
+        writeModJar(newPackJar, "pack_new");
+        Files.copy(newPackJar, duplicate);
+        writePackwizState(game, "pack-new.jar");
+
+        PackJarCleaner.CleanupPlan updated = PackJarCleaner.plan(game, profileRoot);
+        require(updated.deletePaths().contains(oldPackJar), "A previously pack-owned jar removed from pack metadata should be cleaned");
+        require(updated.deletePaths().contains(duplicate), "An identical .jar.duplicate artifact should be cleaned");
+        require(!updated.deletePaths().contains(prismJar), "Unknown Prism-added jars must remain protected");
+        require(!updated.deletePaths().contains(disabledJar), "Disabled jars must remain outside cleanup scope");
+        PackJarCleaner.apply(updated);
+
+        require(!Files.exists(oldPackJar), "Stale pack-owned jar should be removed");
+        require(!Files.exists(duplicate), "Verified duplicate artifact should be removed");
+        require(Files.isRegularFile(prismJar), "Prism-added jar should be preserved");
+        require(Files.isRegularFile(disabledJar), "Disabled jar should be preserved");
+    }
+
+    private static void writePackwizState(Path game, String fileName) throws IOException {
+        Files.writeString(game.resolve("packwiz.json"), """
+                {
+                  "cachedFiles": {
+                    "mods/example.pw.toml": {
+                      "cachedLocation": "mods/%s"
+                    }
+                  }
+                }
+                """.formatted(fileName), StandardCharsets.UTF_8);
+    }
+
     private static void writeModJar(Path path, String modId) throws IOException {
+        writeModJarMetadata(path, "modLoader = \"javafml\"\n[[mods]]\nmodId = \"" + modId + "\"\nversion = \"1\"\n");
+    }
+
+    private static void writeModJarMetadata(Path path, String metadata) throws IOException {
         try (JarOutputStream jar = new JarOutputStream(Files.newOutputStream(path))) {
             jar.putNextEntry(new JarEntry("META-INF/neoforge.mods.toml"));
-            jar.write(("modLoader = \"javafml\"\n[[mods]]\nmodId = \"" + modId + "\"\nversion = \"1\"\n").getBytes(StandardCharsets.UTF_8));
+            jar.write(metadata.getBytes(StandardCharsets.UTF_8));
             jar.closeEntry();
         }
     }

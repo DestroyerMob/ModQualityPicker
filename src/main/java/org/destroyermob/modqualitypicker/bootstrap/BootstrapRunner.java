@@ -109,6 +109,7 @@ public final class BootstrapRunner {
         Options options = parseOptions(args);
         return switch (command) {
             case "apply" -> apply(options);
+            case "clean-jars" -> cleanJars(options);
             case "validate-profile" -> validateProfile(options);
             case "version", "--version" -> {
                 System.out.println("Mod Quality Picker bootstrap 2");
@@ -126,14 +127,22 @@ public final class BootstrapRunner {
         InstancePaths paths = InstancePaths.fromRoot(options.instanceRoot());
         Files.createDirectories(paths.profileRoot());
         FileTransaction.recoverIncomplete(paths.profileRoot());
+        PackJarCleaner.CleanupPlan cleanupPlan = PackJarCleaner.plan(paths.gameDirectory(), paths.profileRoot());
 
         Optional<PendingProfileChange> pending = STORE.readPendingProfile(paths.pendingProfile());
         Optional<PendingProfileChange> previousApplied = STORE.readPendingProfile(paths.appliedProfile());
         ResolvedRequest request = resolveRequest(paths, pending, previousApplied);
         if (request == null) {
+            printCleanupPlan(cleanupPlan);
+            if (!options.dryRun()) {
+                applyCleanupTransaction(paths, cleanupPlan);
+            }
             System.out.println("No pending profile and no active preset were found.");
             return 0;
         }
+
+        cleanupPlan = preserveEnabledProfileJars(paths, request.profile(), cleanupPlan);
+        printCleanupPlan(cleanupPlan);
 
         ProfileValidation validation = ModJarCatalog.validateProfile(paths.gameDirectory(), request.profile());
         validation.actions().forEach(action -> System.out.println("DEPENDENCY " + action));
@@ -180,10 +189,13 @@ public final class BootstrapRunner {
         affected.add(paths.appliedProfile());
         affected.add(paths.pendingProfile());
         affected.add(paths.pendingSelection());
+        affected.addAll(cleanupPlan.deletePaths());
+        affected.add(cleanupPlan.statePath());
 
         try (FileTransaction transaction = FileTransaction.begin(paths.profileRoot())) {
             transaction.track(affected);
             transaction.markApplying();
+            PackJarCleaner.apply(cleanupPlan);
             ModJarCatalog.applyJarOperations(jarPlan.operations());
             ConfigFileManager.applyProfileConfigFiles(paths.gameDirectory(), paths.profileRoot(), request.profile());
             applyWorldDiffs(paths, request);
@@ -196,6 +208,54 @@ public final class BootstrapRunner {
             transaction.commit();
         }
         return 0;
+    }
+
+    private static int cleanJars(Options options) throws IOException {
+        InstancePaths paths = InstancePaths.fromRoot(options.instanceRoot());
+        Files.createDirectories(paths.profileRoot());
+        FileTransaction.recoverIncomplete(paths.profileRoot());
+        PackJarCleaner.CleanupPlan plan = PackJarCleaner.plan(paths.gameDirectory(), paths.profileRoot());
+        printCleanupPlan(plan);
+        if (!options.dryRun()) {
+            applyCleanupTransaction(paths, plan);
+        }
+        return 0;
+    }
+
+    private static PackJarCleaner.CleanupPlan preserveEnabledProfileJars(
+            InstancePaths paths,
+            QualityProfile profile,
+            PackJarCleaner.CleanupPlan cleanupPlan
+    ) throws IOException {
+        Map<String, Boolean> enabled = ModJarCatalog.resolveEnabledMods(paths.gameDirectory(), profile);
+        Map<String, ModJarCatalog.ModJar> jars = ModJarCatalog.discoverModJars(paths.gameDirectory());
+        Set<Path> protectedPaths = new LinkedHashSet<>();
+        enabled.forEach((modId, isEnabled) -> {
+            ModJarCatalog.ModJar jar = jars.get(modId);
+            if (Boolean.TRUE.equals(isEnabled) && jar != null) {
+                protectedPaths.add(jar.path());
+            }
+        });
+        return PackJarCleaner.preserve(cleanupPlan, protectedPaths);
+    }
+
+    private static void printCleanupPlan(PackJarCleaner.CleanupPlan plan) {
+        plan.warnings().forEach(warning -> System.out.println("CLEANUP WARNING " + warning));
+        plan.deletePaths().forEach(path -> System.out.println("CLEANUP remove " + path.getFileName()));
+        if (plan.deletePaths().isEmpty()) {
+            System.out.println("CLEANUP no stale pack-owned jars");
+        }
+    }
+
+    private static void applyCleanupTransaction(InstancePaths paths, PackJarCleaner.CleanupPlan plan) throws IOException {
+        Set<Path> affected = new LinkedHashSet<>(plan.deletePaths());
+        affected.add(plan.statePath());
+        try (FileTransaction transaction = FileTransaction.begin(paths.profileRoot())) {
+            transaction.track(affected);
+            transaction.markApplying();
+            PackJarCleaner.apply(plan);
+            transaction.commit();
+        }
     }
 
     private static int validateProfile(Options options) throws IOException {
@@ -386,6 +446,7 @@ public final class BootstrapRunner {
     private static void printHelp() {
         System.out.println("Mod Quality Picker (self-contained Java pre-launch tool)");
         System.out.println("  apply --instance-root <path> [--world-id <id>] [--dry-run] [--keep-pending]");
+        System.out.println("  clean-jars --instance-root <path> [--dry-run]");
         System.out.println("  validate-profile --instance-root <path> [--profile-id <id>]");
         System.out.println("  version");
     }
