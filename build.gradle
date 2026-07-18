@@ -45,6 +45,7 @@ repositories {
 dependencies {
     annotationProcessor "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
     compileOnly "net.fabricmc:sponge-mixin:0.15.2+mixin.0.8.7"
+    compileOnly files('../BeyondControls/build/finalJars/controlify-3.0.1+beyond.22+1.21.1-neoforge.jar')
     bootstrapGson("com.google.code.gson:gson:2.11.0") {
         transitive = false
     }

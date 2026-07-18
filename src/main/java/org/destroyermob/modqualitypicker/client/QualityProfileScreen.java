@@ -176,7 +176,9 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void refreshControllerListButtons() {
-        boolean refocusList = this.listFocusButtons.contains(this.getFocused());
+        int focusedRow = this.getFocused() instanceof ControllerFocusButton button
+                ? button.rowIndex()
+                : -1;
         for (ControllerFocusButton button : this.listFocusButtons) {
             this.removeWidget(button);
         }
@@ -193,30 +195,38 @@ public final class QualityProfileScreen extends Screen {
                     : Component.literal(this.filteredMods.get(absoluteIndex));
             ControllerFocusButton button = this.addRenderableWidget(new ControllerFocusButton(
                     listX() + 2, listTop() + visible * ROW_HEIGHT + 1,
-                    listWidth() - 4, ROW_HEIGHT - 2, label,
+                    listWidth() - 4, ROW_HEIGHT - 2, absoluteIndex, label,
                     () -> selectRow(absoluteIndex)
             ));
             this.listFocusButtons.add(button);
         }
-        listScrollbarGeometry().ifPresent(scrollbar -> {
-            int halfHeight = Math.max(10, scrollbar.trackHeight() / 2);
-            ControllerFocusButton previous = this.addRenderableWidget(new ControllerFocusButton(
-                    scrollbar.barX() - 8, scrollbar.trackTop(), 11, halfHeight,
-                    Component.translatable("modqualitypicker.editor.previous_page"),
-                    () -> setScrollForTab(scrollForTab() - visibleRows())
-            ));
-            ControllerFocusButton next = this.addRenderableWidget(new ControllerFocusButton(
-                    scrollbar.barX() - 8, scrollbar.trackTop() + halfHeight, 11,
-                    scrollbar.trackHeight() - halfHeight,
-                    Component.translatable("modqualitypicker.editor.next_page"),
-                    () -> setScrollForTab(scrollForTab() + visibleRows())
-            ));
-            this.listFocusButtons.add(previous);
-            this.listFocusButtons.add(next);
-        });
-        if (refocusList && !this.listFocusButtons.isEmpty()) {
-            this.setInitialFocus(this.listFocusButtons.getFirst());
+        if (focusedRow >= 0 && !this.listFocusButtons.isEmpty()) {
+            int preferredRow = focusedRow >= scroll && focusedRow < scroll + this.listFocusButtons.size()
+                    ? focusedRow
+                    : selectedIndexForTab();
+            ControllerFocusButton preferred = this.listFocusButtons.stream()
+                    .filter(button -> button.rowIndex() == preferredRow)
+                    .findFirst()
+                    .orElse(this.listFocusButtons.getFirst());
+            this.setFocused(preferred);
         }
+    }
+
+    void controllerPageList(int direction) {
+        if (direction == 0 || itemCountForTab() <= 0) return;
+        int pageSize = visibleRows();
+        int target = clampIndex(selectedIndexForTab() + direction * pageSize, itemCountForTab());
+        if (this.tab == Tab.PROFILES) {
+            this.profileScroll = Math.max(0, Math.min(this.profileScroll + direction * pageSize, maxScrollForTab()));
+        } else {
+            this.modScroll = Math.max(0, Math.min(this.modScroll + direction * pageSize, maxScrollForTab()));
+        }
+        selectRow(target);
+        refreshControllerListButtons();
+        this.listFocusButtons.stream()
+                .filter(button -> button.rowIndex() == target)
+                .findFirst()
+                .ifPresent(this::setFocused);
     }
 
     @Override
