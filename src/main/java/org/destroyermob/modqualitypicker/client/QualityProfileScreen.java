@@ -91,6 +91,7 @@ public final class QualityProfileScreen extends Screen {
     private final Map<String, Boolean> resolvedModStates = new LinkedHashMap<>();
     private final Map<String, ModJarCatalog.ModInspection> modInspections = new LinkedHashMap<>();
     private final List<Button> modActionButtons = new ArrayList<>();
+    private final List<ControllerFocusButton> listFocusButtons = new ArrayList<>();
 
     private int selectedProfileIndex;
     private int selectedModIndex;
@@ -171,6 +172,51 @@ public final class QualityProfileScreen extends Screen {
 
         initActionButtons();
         updateModActionButtons();
+        refreshControllerListButtons();
+    }
+
+    private void refreshControllerListButtons() {
+        boolean refocusList = this.listFocusButtons.contains(this.getFocused());
+        for (ControllerFocusButton button : this.listFocusButtons) {
+            this.removeWidget(button);
+        }
+        this.listFocusButtons.clear();
+        int count = itemCountForTab();
+        int scroll = scrollForTab();
+        for (int visible = 0; visible < visibleRows(); visible++) {
+            int absoluteIndex = scroll + visible;
+            if (absoluteIndex >= count) {
+                break;
+            }
+            Component label = this.tab == Tab.PROFILES
+                    ? Component.literal(this.profiles.get(absoluteIndex).displayName())
+                    : Component.literal(this.filteredMods.get(absoluteIndex));
+            ControllerFocusButton button = this.addRenderableWidget(new ControllerFocusButton(
+                    listX() + 2, listTop() + visible * ROW_HEIGHT + 1,
+                    listWidth() - 4, ROW_HEIGHT - 2, label,
+                    () -> selectRow(absoluteIndex)
+            ));
+            this.listFocusButtons.add(button);
+        }
+        listScrollbarGeometry().ifPresent(scrollbar -> {
+            int halfHeight = Math.max(10, scrollbar.trackHeight() / 2);
+            ControllerFocusButton previous = this.addRenderableWidget(new ControllerFocusButton(
+                    scrollbar.barX() - 8, scrollbar.trackTop(), 11, halfHeight,
+                    Component.translatable("modqualitypicker.editor.previous_page"),
+                    () -> setScrollForTab(scrollForTab() - visibleRows())
+            ));
+            ControllerFocusButton next = this.addRenderableWidget(new ControllerFocusButton(
+                    scrollbar.barX() - 8, scrollbar.trackTop() + halfHeight, 11,
+                    scrollbar.trackHeight() - halfHeight,
+                    Component.translatable("modqualitypicker.editor.next_page"),
+                    () -> setScrollForTab(scrollForTab() + visibleRows())
+            ));
+            this.listFocusButtons.add(previous);
+            this.listFocusButtons.add(next);
+        });
+        if (refocusList && !this.listFocusButtons.isEmpty()) {
+            this.setInitialFocus(this.listFocusButtons.getFirst());
+        }
     }
 
     @Override
@@ -1285,6 +1331,9 @@ public final class QualityProfileScreen extends Screen {
         String selected = selectedMod().orElse("");
         this.modSearchText = value == null ? "" : value;
         applyModFilter(selected);
+        if (this.minecraft != null) {
+            refreshControllerListButtons();
+        }
     }
 
     private void applyModFilter(String preserveModId) {
@@ -1522,6 +1571,9 @@ public final class QualityProfileScreen extends Screen {
             this.profileScroll = clamped;
         } else {
             this.modScroll = clamped;
+        }
+        if (this.minecraft != null) {
+            refreshControllerListButtons();
         }
     }
 

@@ -18,6 +18,8 @@
   "modqualitypicker.editor.disable_plan_title": "Disable Related Mods?",
   "modqualitypicker.editor.disable_unused_deps": "Unused Deps",
   "modqualitypicker.editor.done": "Done",
+  "modqualitypicker.editor.previous_page": "Previous page",
+  "modqualitypicker.editor.next_page": "Next page",
   "modqualitypicker.editor.edit_mods": "Edit Mods",
   "modqualitypicker.editor.export": "Export",
   "modqualitypicker.editor.filter_all": "All",
