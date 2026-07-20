@@ -15,9 +15,14 @@ public final class ProfileExporter {
     public static Path exportPresets(Path destinationRoot) throws IOException {
         copyTree(ProfilePaths.defaultsRoot(), destinationRoot.resolve("defaults"));
         copyTree(ProfilePaths.presetsRoot(), destinationRoot.resolve("presets"));
+        copyTree(ProfilePaths.instanceRoot().resolve("features"), destinationRoot.resolve("features"));
         if (Files.isRegularFile(ProfilePaths.defaultsManifest())) {
             Files.createDirectories(destinationRoot);
             Files.copy(ProfilePaths.defaultsManifest(), destinationRoot.resolve("defaults-manifest.json"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        }
+        if (Files.isRegularFile(ProfilePaths.featureGroups())) {
+            Files.createDirectories(destinationRoot);
+            Files.copy(ProfilePaths.featureGroups(), destinationRoot.resolve("feature-groups.json"), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
         }
         return destinationRoot;
     }

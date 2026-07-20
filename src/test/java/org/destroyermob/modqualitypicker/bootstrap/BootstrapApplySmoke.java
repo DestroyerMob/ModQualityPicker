@@ -14,6 +14,7 @@ import org.destroyermob.modqualitypicker.profile.QualitySelection;
 import org.destroyermob.modqualitypicker.runtime.ModJarCatalog;
 
 import java.io.IOException;
+import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -45,6 +46,7 @@ public final class BootstrapApplySmoke {
 
     private static void runFixture(Path game) throws Exception {
         runCleanerFixture(game.resolve("cleaner-fixture"));
+        runNestedProviderFixture(game.resolve("nested-provider-fixture"));
         Path mods = Files.createDirectories(game.resolve("mods"));
         Path profileRoot = Files.createDirectories(game.resolve("config/modqualitypicker"));
         Path presets = Files.createDirectories(profileRoot.resolve("presets"));
@@ -97,7 +99,7 @@ public final class BootstrapApplySmoke {
         );
         QualityPackDefinition definition = new QualityPackDefinition(2, Map.of("ecology", ecology));
         QualityProfile balanced = new QualityProfile(
-                2,
+                3,
                 "balanced",
                 "Balanced",
                 10,
@@ -107,11 +109,23 @@ public final class BootstrapApplySmoke {
                 Map.of(),
                 Map.of("ecology", "off")
         );
-        QualitySelection selection = QualitySelection.forBase("balanced").withOverride("ecology", "max");
+        QualityProfile maximum = new QualityProfile(
+                3,
+                "max",
+                "Max",
+                20,
+                "",
+                Map.of("ecology", new ModState(true, false, "", List.of(ecologyConfig))),
+                List.of(),
+                Map.of(),
+                Map.of("ecology", "max")
+        );
+        QualitySelection selection = QualitySelection.forBase("balanced").withModProfileOverride("ecology", "max");
 
         ProfileStore store = new ProfileStore();
         store.writePackDefinition(profileRoot.resolve("feature-groups.json"), definition);
         store.writeProfile(presets.resolve("balanced.json"), balanced);
+        store.writeProfile(presets.resolve("max.json"), maximum);
         store.writePendingProfile(
                 profileRoot.resolve("pending-profile.json"),
                 PendingProfileChange.of(balanced, selection, "smoke-test", "")
@@ -124,7 +138,39 @@ public final class BootstrapApplySmoke {
         require(Files.readString(game.resolve("config/ecology-common.toml")).contains("FULL_SIMULATION"), "Ecology config overlay should apply");
         require(!Files.exists(profileRoot.resolve("pending-profile.json")), "Pending profile should be cleared after success");
         PendingProfileChange applied = store.readPendingProfile(profileRoot.resolve("applied-profile.json")).orElseThrow();
-        require("max".equals(applied.selection().featureOverrides().get("ecology")), "Applied receipt should preserve feature overrides");
+        require("max".equals(applied.selection().modProfileOverrides().get("ecology")), "Applied receipt should preserve per-mod preset overrides");
+    }
+
+    private static void runNestedProviderFixture(Path game) throws Exception {
+        Path mods = Files.createDirectories(game.resolve("mods"));
+        Path distantHorizons = mods.resolve("DistantHorizons.jar");
+        Path fabricApi = mods.resolve("forgified-fabric-api.jar");
+        writeModJarWithNested(distantHorizons, "distanthorizons", "fabric_api");
+        writeModJarWithNested(fabricApi, "forgified_fabric_api", "fabric_api");
+
+        QualityProfile profile = new QualityProfile(
+                2,
+                "low",
+                "Low",
+                0,
+                "",
+                Map.of(
+                        "distanthorizons", new ModState(false, true, "device quality choice"),
+                        "forgified_fabric_api", state(true),
+                        "fabric_api", state(true)
+                ),
+                List.of(),
+                Map.of(),
+                Map.of()
+        );
+
+        require(!ModJarCatalog.validateProfile(game, profile).hasErrors(), "A nested duplicate provider must not prevent disabling its optional parent jar");
+        ModJarCatalog.JarPlan plan = ModJarCatalog.planProfileChanges(game, profile);
+        require(plan.operations().stream().anyMatch(operation -> operation.source().equals(distantHorizons)
+                        && operation.type() == ModJarCatalog.JarOperationType.MOVE_REPLACE),
+                "Disabling Distant Horizons should disable its physical jar");
+        require(plan.operations().stream().noneMatch(operation -> operation.source().equals(fabricApi)),
+                "Disabling Distant Horizons must not disable the separate Fabric API provider");
     }
 
     private static void runCleanerFixture(Path game) throws Exception {
@@ -181,6 +227,23 @@ public final class BootstrapApplySmoke {
         try (JarOutputStream jar = new JarOutputStream(Files.newOutputStream(path))) {
             jar.putNextEntry(new JarEntry("META-INF/neoforge.mods.toml"));
             jar.write(metadata.getBytes(StandardCharsets.UTF_8));
+            jar.closeEntry();
+        }
+    }
+
+    private static void writeModJarWithNested(Path path, String modId, String nestedModId) throws IOException {
+        ByteArrayOutputStream nestedBytes = new ByteArrayOutputStream();
+        try (JarOutputStream nested = new JarOutputStream(nestedBytes)) {
+            nested.putNextEntry(new JarEntry("META-INF/neoforge.mods.toml"));
+            nested.write(("modLoader = \"javafml\"\n[[mods]]\nmodId = \"" + nestedModId + "\"\nversion = \"1\"\n").getBytes(StandardCharsets.UTF_8));
+            nested.closeEntry();
+        }
+        try (JarOutputStream jar = new JarOutputStream(Files.newOutputStream(path))) {
+            jar.putNextEntry(new JarEntry("META-INF/neoforge.mods.toml"));
+            jar.write(("modLoader = \"javafml\"\n[[mods]]\nmodId = \"" + modId + "\"\nversion = \"1\"\n").getBytes(StandardCharsets.UTF_8));
+            jar.closeEntry();
+            jar.putNextEntry(new JarEntry("META-INF/jarjar/" + nestedModId + ".jar"));
+            jar.write(nestedBytes.toByteArray());
             jar.closeEntry();
         }
     }

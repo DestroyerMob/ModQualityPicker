@@ -9,22 +9,28 @@ import java.util.Objects;
 public record QualitySelection(
         int schemaVersion,
         String baseProfileId,
-        Map<String, String> featureOverrides
+        Map<String, String> featureOverrides,
+        Map<String, String> modProfileOverrides
 ) {
-    public static final int SCHEMA_VERSION = 2;
+    public static final int SCHEMA_VERSION = 3;
 
     public QualitySelection {
-        schemaVersion = schemaVersion <= 0 ? SCHEMA_VERSION : schemaVersion;
+        schemaVersion = SCHEMA_VERSION;
         baseProfileId = normalizeId(Objects.requireNonNullElse(baseProfileId, "balanced"));
         featureOverrides = immutableMap(featureOverrides);
+        modProfileOverrides = immutableMap(modProfileOverrides);
+    }
+
+    public QualitySelection(int schemaVersion, String baseProfileId, Map<String, String> featureOverrides) {
+        this(schemaVersion, baseProfileId, featureOverrides, Map.of());
     }
 
     public static QualitySelection forBase(String profileId) {
-        return new QualitySelection(SCHEMA_VERSION, profileId, Map.of());
+        return new QualitySelection(SCHEMA_VERSION, profileId, Map.of(), Map.of());
     }
 
     public QualitySelection withBaseProfile(String profileId) {
-        return new QualitySelection(schemaVersion, profileId, Map.of());
+        return new QualitySelection(SCHEMA_VERSION, profileId, Map.of(), Map.of());
     }
 
     public QualitySelection withOverride(String featureId, String choiceId) {
@@ -34,11 +40,25 @@ public record QualitySelection(
         } else {
             updated.put(normalizeId(featureId), normalizeId(choiceId));
         }
-        return new QualitySelection(schemaVersion, baseProfileId, updated);
+        return new QualitySelection(SCHEMA_VERSION, baseProfileId, updated, modProfileOverrides);
     }
 
     public QualitySelection withoutOverride(String featureId) {
         return withOverride(featureId, "");
+    }
+
+    public QualitySelection withModProfileOverride(String modId, String profileId) {
+        Map<String, String> updated = new LinkedHashMap<>(modProfileOverrides);
+        if (profileId == null || profileId.isBlank()) {
+            updated.remove(normalizeId(modId));
+        } else {
+            updated.put(normalizeId(modId), normalizeId(profileId));
+        }
+        return new QualitySelection(SCHEMA_VERSION, baseProfileId, featureOverrides, updated);
+    }
+
+    public QualitySelection withoutModProfileOverride(String modId) {
+        return withModProfileOverride(modId, "");
     }
 
     private static String normalizeId(String value) {

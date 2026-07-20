@@ -169,6 +169,33 @@ class PrismHelperConfigTests(unittest.TestCase):
         self.assertIn("add disabled_mod = disabled", actions)
         self.assertIn("remove missing stale_mod", actions)
 
+    def test_capture_profile_diff_can_attach_config_to_enabled_mod(self) -> None:
+        self.write_game_file("config/ecology-common.toml", 'gameplayPreset = "SAFE"\n')
+        profile_path = self.write_profile("max")
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile["mods"] = {
+            "ecology": {"enabled": True, "locked": False, "reason": "full simulation"},
+        }
+        profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
+        mqp.capture_default_configs(self.paths, force=False, dry_run=False)
+        self.write_game_file("config/ecology-common.toml", 'gameplayPreset = "FULL_SIMULATION"\n')
+
+        mqp.capture_profile_diffs(
+            self.paths,
+            profile_id="max",
+            changed_only=True,
+            capture_missing_defaults=False,
+            dry_run=False,
+            mod_id="ecology",
+            selected_configs=("config/ecology-common.toml",),
+        )
+
+        captured = json.loads(profile_path.read_text(encoding="utf-8"))
+        self.assertEqual(captured["schemaVersion"], 3)
+        self.assertEqual(captured["configFiles"], [])
+        self.assertEqual(captured["mods"]["ecology"]["configFiles"][0]["path"], "config/ecology-common.toml")
+        self.assertTrue((self.mod_config_dir / "presets/max/config/ecology-common.toml.diff").is_file())
+
     def test_profile_and_world_diffs_layer_over_defaults(self) -> None:
         self.write_game_file("config/example.toml", "foo = 1\nbar = 2\n")
         self.write_profile("balanced")

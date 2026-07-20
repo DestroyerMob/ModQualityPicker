@@ -842,16 +842,39 @@ def capture_default_configs(paths: InstancePaths, force: bool, dry_run: bool) ->
     return actions
 
 
-def capture_profile_diffs(paths: InstancePaths, profile_id: str, changed_only: bool, capture_missing_defaults: bool, dry_run: bool) -> list[str]:
+def capture_profile_diffs(
+    paths: InstancePaths,
+    profile_id: str,
+    changed_only: bool,
+    capture_missing_defaults: bool,
+    dry_run: bool,
+    mod_id: str = "",
+    selected_configs: tuple[str, ...] = (),
+) -> list[str]:
     profile_path, profile = load_profile(paths, profile_id)
-    configs = profile_config_items(profile)
+    if mod_id:
+        mods = profile.get("mods", {})
+        state = mods.get(mod_id) if isinstance(mods, dict) else None
+        if not isinstance(state, dict):
+            raise SystemExit(f"Profile {profile_id} does not define mod {mod_id}")
+        if not bool(state.get("enabled", False)):
+            raise SystemExit(f"Enable {mod_id} in profile {profile_id} before capturing its config")
+        if not selected_configs:
+            raise SystemExit("--mod-id requires at least one --config path")
+        existing = state.get("configFiles", [])
+        configs = [item for item in existing if isinstance(item, dict)] if isinstance(existing, list) else []
+    else:
+        configs = profile_config_items(profile)
     manifest = load_default_manifest(paths)
     default_entries = dict(manifest.get("entries", {}))
     default_manifest_changed = False
 
     actions: list[str] = []
     by_path = {item.get("path", ""): item for item in configs if item.get("path", "")}
+    requested = set(selected_configs)
     for relative_path in list_config_files(paths):
+        if requested and relative_path not in requested:
+            continue
         source = resolve_inside(paths.game_dir, relative_path)
         baseline = resolve_inside(paths.mod_config_dir, f"{DEFAULTS_ROOT}/{relative_path}")
         if not baseline.exists():
@@ -884,7 +907,12 @@ def capture_profile_diffs(paths: InstancePaths, profile_id: str, changed_only: b
             write_lines(diff_file, diff_lines)
 
     if not dry_run:
-        profile["configFiles"] = [by_path[path] for path in sorted(by_path)]
+        captured = [by_path[path] for path in sorted(by_path)]
+        if mod_id:
+            profile["mods"][mod_id]["configFiles"] = captured
+            profile["schemaVersion"] = max(3, int(profile.get("schemaVersion", 0)))
+        else:
+            profile["configFiles"] = captured
         profile_path.write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
         if default_manifest_changed:
             write_default_manifest(paths, manifest_with_entries(default_entries))
@@ -1517,7 +1545,15 @@ def capture_defaults(args: argparse.Namespace) -> int:
 
 def capture_diffs(args: argparse.Namespace) -> int:
     paths = InstancePaths.from_root(Path(args.instance_root))
-    actions = capture_profile_diffs(paths, args.profile_id, args.changed_only, args.capture_missing_defaults, args.dry_run)
+    actions = capture_profile_diffs(
+        paths,
+        args.profile_id,
+        args.changed_only,
+        args.capture_missing_defaults,
+        args.dry_run,
+        args.mod_id,
+        tuple(args.config or ()),
+    )
     for action in actions:
         print(action)
     if not actions:
@@ -1595,6 +1631,8 @@ def build_parser() -> argparse.ArgumentParser:
     diffs.add_argument("--profile-id", required=True)
     diffs.add_argument("--changed-only", action="store_true", help="Only keep config entries with non-empty diffs.")
     diffs.add_argument("--capture-missing-defaults", action="store_true", help="Create missing baselines from the live config before diffing.")
+    diffs.add_argument("--mod-id", default="", help="Attach captured overlays to this enabled mod instead of the whole preset.")
+    diffs.add_argument("--config", action="append", help="Config path owned by --mod-id. Can be repeated.")
     diffs.add_argument("--dry-run", action="store_true")
     diffs.set_defaults(func=capture_diffs)
 

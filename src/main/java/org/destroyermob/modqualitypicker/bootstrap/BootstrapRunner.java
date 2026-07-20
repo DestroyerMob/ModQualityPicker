@@ -263,7 +263,7 @@ public final class BootstrapRunner {
         QualityPackDefinition definition = loadDefinition(paths);
         String profileId = options.profileId().isBlank() ? activeProfileId(paths.commonConfig()) : options.profileId();
         QualityProfile base = loadProfile(paths, profileId).orElseThrow(() -> new IOException("Profile not found: " + profileId));
-        EffectiveQualitySelection effective = QualitySelectionResolver.resolve(base, definition, QualitySelection.forBase(profileId));
+        EffectiveQualitySelection effective = QualitySelectionResolver.resolve(base, loadProfiles(paths), definition, QualitySelection.forBase(profileId));
         ProfileValidation validation = ModJarCatalog.validateProfile(paths.gameDirectory(), effective.profile());
         validation.actions().forEach(action -> System.out.println("DEPENDENCY " + action));
         validation.warnings().forEach(warning -> System.out.println("WARNING " + warning));
@@ -290,7 +290,7 @@ public final class BootstrapRunner {
             }
             Optional<QualityProfile> base = loadProfile(paths, change.selection().baseProfileId());
             if (base.isPresent()) {
-                EffectiveQualitySelection effective = QualitySelectionResolver.resolve(base.get(), definition, change.selection());
+                EffectiveQualitySelection effective = QualitySelectionResolver.resolve(base.get(), loadProfiles(paths), definition, change.selection());
                 return new ResolvedRequest(effective.profile(), effective.selection(), change.reason(), change.sourceWorldId());
             }
             return new ResolvedRequest(change.profile(), change.selection(), change.reason(), change.sourceWorldId());
@@ -303,7 +303,7 @@ public final class BootstrapRunner {
                 .orElseGet(() -> QualitySelection.forBase(activeId));
         Optional<QualityProfile> base = loadProfile(paths, selection.baseProfileId());
         if (base.isPresent()) {
-            EffectiveQualitySelection effective = QualitySelectionResolver.resolve(base.get(), definition, selection);
+            EffectiveQualitySelection effective = QualitySelectionResolver.resolve(base.get(), loadProfiles(paths), definition, selection);
             return new ResolvedRequest(effective.profile(), effective.selection(), "active-profile", "");
         }
         return previousApplied
@@ -319,6 +319,19 @@ public final class BootstrapRunner {
     private static Optional<QualityProfile> loadProfile(InstancePaths paths, String profileId) throws IOException {
         String file = profileId.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9_.-]", "_") + ".json";
         return STORE.readProfile(paths.presetsRoot().resolve(file));
+    }
+
+    private static List<QualityProfile> loadProfiles(InstancePaths paths) throws IOException {
+        if (!Files.isDirectory(paths.presetsRoot())) {
+            return List.of();
+        }
+        List<QualityProfile> profiles = new ArrayList<>();
+        try (var files = Files.list(paths.presetsRoot())) {
+            for (Path path : files.filter(file -> file.getFileName().toString().endsWith(".json")).sorted().toList()) {
+                STORE.readProfile(path).ifPresent(profiles::add);
+            }
+        }
+        return profiles;
     }
 
     private static List<String> validateWorldDiffs(InstancePaths paths, ResolvedRequest request) {

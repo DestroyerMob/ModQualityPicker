@@ -5,8 +5,9 @@ Mod Quality Picker is a pack-developer tool for shipping multiple performance an
 ## Core Model
 
 - A base profile is a named preset with an explicit `sortOrder`, mod states, config file rules, and default feature choices.
+- Each mod state may own config overlays for that preset. A player can point an individual mod at another shipped preset, which takes that preset's enabled state and mod-owned config without changing unrelated mods.
 - `feature-groups.json` defines independent, pack-owned quality axes. Each choice can contribute mod states and config rules without replacing unrelated choices.
-- A player selection stores a base profile id plus only the feature overrides that differ from that base.
+- A player selection stores a base profile id plus only the feature and per-mod preset overrides that differ from that base. Selecting another base profile clears both kinds of overrides, so the global preset controls every mod by default.
 - The current launch writes `config/modqualitypicker/active-selection.json`.
 - Pending changes are written to `config/modqualitypicker/pending-selection.json`; a helper spawned from the mod jar waits for Minecraft to exit and then consumes them.
 - Generated config defaults live under `config/modqualitypicker/defaults`.
@@ -28,14 +29,16 @@ The implementation avoids altering loaded mods in-process. Enabling and disablin
 
 ## Pack Developer Flow
 
-Players can open `Options -> Pack Quality` to select a base preset and independently cycle through player-adjustable feature groups. The screen resolves the final mod set immediately for inspection, but queues changes for the next launch instead of trying to unload or load mods in-process.
+Players can open `Options -> Pack Quality` to select a base preset, independently cycle pack-defined quality presets for individual mods, and adjust any player-facing feature groups. The screen resolves the final mod and config set immediately for inspection, but queues changes for the next launch instead of trying to unload or load mods in-process.
 
 Pack developers can open the detailed editor from the player screen or `/modqualitypicker developer`. The editor is intentionally tabbed:
 
 - `Profiles` handles profile switching, saving, capture, queueing, and exporting.
-- `Mods` shows a scrollable list of loaded mod ids and handles enabled/disabled state, locked state, and override removal.
+- `Mods` shows a searchable list of loaded mod ids and handles enabled/disabled state, locked state, per-mod config ownership, dependency-aware disabling, and override removal.
+- `Features` authors pack-owned feature groups and choices, selects each preset's default choice, and opens the selected choice's mod/config editors.
+- `Configs` searches live config files, assigns each file to the whole preset, one mod, or one feature choice, and captures it as a diff, replacement, TOML merge, or keep-player rule.
 
-Config-file rules remain in the data model and launcher helper, but their in-game editor controls are hidden until that workflow is clearer. Live config files are treated as disposable output: the helper rebuilds them from the captured defaults, then the selected profile's diff, then any world-specific diff before launch.
+Live config files are treated as disposable authoring output. `Capture` records the current live file for the selected owner and mode. The helper rebuilds configs from the captured defaults, then preset-wide rules, feature and mod-owned rules, and finally any world-specific diff before launch.
 
 Profile order is stored in `sortOrder`. The Profiles tab can move presets up or down, rewriting the order values that the player-facing cycle button uses.
 
@@ -50,7 +53,7 @@ Profile order is stored in `sortOrder`. The Profiles tab can move presets up or 
 - Player-facing current/desired/disabled mod inspection and restart/new-world requirements.
 - Preflight validation that rejects missing or malformed profile/world config layers before any jars are renamed.
 - Profile/catalog reconciliation for adding newly installed mods and pruning stale entries.
-- Pack export command that copies defaults and presets into the pack root.
+- Pack export command that copies defaults, presets, feature definitions, and feature overlays into the pack root.
 - Helper smoke tests for default capture and preset/world diff layering.
 
 ## Next Hardening Pass

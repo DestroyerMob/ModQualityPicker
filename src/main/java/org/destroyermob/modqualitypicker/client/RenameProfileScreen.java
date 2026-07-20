@@ -11,13 +11,19 @@ import java.util.function.Consumer;
 
 final class RenameProfileScreen extends Screen {
     private final Screen parent;
+    private final Component fieldLabel;
     private final String currentName;
     private final Consumer<String> onRename;
     private EditBox nameBox;
 
     RenameProfileScreen(Screen parent, String currentName, Consumer<String> onRename) {
-        super(Component.translatable("modqualitypicker.rename.title"));
+        this(parent, Component.translatable("modqualitypicker.rename.title"), Component.translatable("modqualitypicker.rename.name"), currentName, onRename);
+    }
+
+    RenameProfileScreen(Screen parent, Component title, Component fieldLabel, String currentName, Consumer<String> onRename) {
+        super(title);
         this.parent = parent;
+        this.fieldLabel = fieldLabel;
         this.currentName = currentName;
         this.onRename = onRename;
     }
@@ -33,7 +39,7 @@ final class RenameProfileScreen extends Screen {
                 centerY - 12,
                 240,
                 20,
-                Component.translatable("modqualitypicker.rename.name")
+                this.fieldLabel
         );
         this.nameBox.setMaxLength(64);
         this.nameBox.setValue(this.currentName);
@@ -54,7 +60,7 @@ final class RenameProfileScreen extends Screen {
         guiGraphics.drawCenteredString(this.font, this.title, this.width / 2, this.height / 2 - 52, 0xFFFFFF);
         guiGraphics.drawString(
                 this.font,
-                Component.translatable("modqualitypicker.rename.name"),
+                this.fieldLabel,
                 this.width / 2 - 120,
                 this.height / 2 - 26,
                 0xD0D0D0,

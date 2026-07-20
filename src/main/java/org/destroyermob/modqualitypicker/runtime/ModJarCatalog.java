@@ -46,7 +46,7 @@ public final class ModJarCatalog {
             "neoforge"
     );
 
-    public record ModJar(Path path, Set<String> modIds, Set<String> requiredModIds) {
+    public record ModJar(Path path, Set<String> modIds, Set<String> selectableModIds, Set<String> requiredModIds) {
     }
 
     public record DependentJar(String fileName, List<String> modIds, List<String> requiredProvidedIds) {
@@ -137,9 +137,9 @@ public final class ModJarCatalog {
         }
     }
 
-    private record ModMetadata(Set<String> modIds, Set<String> requiredModIds) {
+    private record ModMetadata(Set<String> modIds, Set<String> selectableModIds, Set<String> requiredModIds) {
         private static ModMetadata empty() {
-            return new ModMetadata(new LinkedHashSet<>(), new LinkedHashSet<>());
+            return new ModMetadata(new LinkedHashSet<>(), new LinkedHashSet<>(), new LinkedHashSet<>());
         }
     }
 
@@ -191,11 +191,16 @@ public final class ModJarCatalog {
 
                 ModMetadata metadata = readModMetadata(path);
                 Set<String> modIds = new LinkedHashSet<>(metadata.modIds());
+                Set<String> selectableModIds = new LinkedHashSet<>(metadata.selectableModIds());
                 if (modIds.isEmpty()) {
-                    modIds.add(fallbackModId(path));
+                    String fallbackId = fallbackModId(path);
+                    modIds.add(fallbackId);
+                    selectableModIds.add(fallbackId);
+                } else if (selectableModIds.isEmpty()) {
+                    selectableModIds.addAll(modIds);
                 }
 
-                ModJar jar = new ModJar(path, Set.copyOf(modIds), Set.copyOf(metadata.requiredModIds()));
+                ModJar jar = new ModJar(path, Set.copyOf(modIds), Set.copyOf(selectableModIds), Set.copyOf(metadata.requiredModIds()));
                 for (String modId : modIds) {
                     discovered.putIfAbsent(modId, jar);
                 }
@@ -266,12 +271,9 @@ public final class ModJarCatalog {
         Map<String, Boolean> desiredByMod = resolved.desiredByMod();
 
         Map<Path, Boolean> desiredByJar = new HashMap<>();
-        for (Map.Entry<String, Boolean> entry : desiredByMod.entrySet()) {
-            ModJar jar = discovered.get(entry.getKey());
-            if (jar == null) {
-                continue;
-            }
-            desiredByJar.merge(jar.path(), entry.getValue(), Boolean::logicalOr);
+        for (ModJar jar : new LinkedHashSet<>(discovered.values())) {
+            boolean enabled = jar.selectableModIds().stream().anyMatch(modId -> Objects.equals(desiredByMod.get(modId), true));
+            desiredByJar.put(jar.path(), enabled);
         }
 
         List<JarOperation> operations = new ArrayList<>();
@@ -340,7 +342,7 @@ public final class ModJarCatalog {
             if (entry.getValue() && current == null) {
                 mods.put(modId, new ModState(true, modId.equals(MOD_ID), requiredReason(modId, resolved.actions())));
             } else if (entry.getValue() && !current.enabled()) {
-                mods.put(modId, new ModState(true, true, requiredReason(modId, resolved.actions())));
+                mods.put(modId, new ModState(true, true, requiredReason(modId, resolved.actions()), current.configFiles()));
             }
         }
 
@@ -445,7 +447,7 @@ public final class ModJarCatalog {
             return;
         }
 
-        for (String siblingId : new TreeSet<>(jar.modIds())) {
+        for (String siblingId : new TreeSet<>(jar.selectableModIds())) {
             addDisableReason(reasons, siblingId, siblingId.equals(rootModId) ? "selected mod" : "provided by the same jar");
         }
     }
@@ -502,7 +504,7 @@ public final class ModJarCatalog {
             return false;
         }
 
-        for (String siblingId : jar.modIds()) {
+        for (String siblingId : jar.selectableModIds()) {
             if (!siblingId.equals(modId) && !disabledModIds.contains(siblingId) && Objects.equals(desiredByMod.get(siblingId), true)) {
                 return true;
             }
@@ -594,7 +596,7 @@ public final class ModJarCatalog {
         }
 
         List<String> siblings = new ArrayList<>();
-        for (String siblingId : jar.modIds()) {
+        for (String siblingId : jar.selectableModIds()) {
             if (!siblingId.equals(modId) && Objects.equals(desiredByMod.get(siblingId), true)) {
                 siblings.add(siblingId);
             }
@@ -755,7 +757,7 @@ public final class ModJarCatalog {
                     }
 
                     for (String bundledId : requiredJar.modIds()) {
-                        if (!Objects.equals(desiredByMod.get(bundledId), true)) {
+                        if (!blockedModIds.contains(bundledId) && !Objects.equals(desiredByMod.get(bundledId), true)) {
                             desiredByMod.put(bundledId, true);
                             changed = true;
                         }
@@ -799,13 +801,13 @@ public final class ModJarCatalog {
             if (metadata.modIds().isEmpty()) {
                 Set<String> fallback = new LinkedHashSet<>();
                 fallback.add(fallbackModId(path));
-                return new ModMetadata(fallback, metadata.requiredModIds());
+                return new ModMetadata(fallback, fallback, metadata.requiredModIds());
             }
             return metadata;
         } catch (IOException exception) {
             Set<String> fallback = new LinkedHashSet<>();
             fallback.add(fallbackModId(path));
-            return new ModMetadata(fallback, new LinkedHashSet<>());
+            return new ModMetadata(fallback, fallback, new LinkedHashSet<>());
         }
     }
 
@@ -815,6 +817,7 @@ public final class ModJarCatalog {
 
     private static ModMetadata readModMetadata(InputStream input, int depth) throws IOException {
         Set<String> ids = new LinkedHashSet<>();
+        Set<String> selectableIds = new LinkedHashSet<>();
         Set<String> fabricIds = new LinkedHashSet<>();
         Set<String> required = new LinkedHashSet<>();
         Set<String> fabricRequired = new LinkedHashSet<>();
@@ -846,12 +849,13 @@ public final class ModJarCatalog {
             ids.addAll(fabricIds);
             required.addAll(fabricRequired);
         }
+        selectableIds.addAll(ids);
         for (byte[] nestedJar : nestedJars) {
             ModMetadata nested = readModMetadata(new ByteArrayInputStream(nestedJar), depth + 1);
             ids.addAll(nested.modIds());
             required.addAll(nested.requiredModIds());
         }
-        return new ModMetadata(ids, required);
+        return new ModMetadata(ids, selectableIds, required);
     }
 
     private static Set<String> readNeoForgeModIds(String metadata) {

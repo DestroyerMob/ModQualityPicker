@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -139,6 +140,26 @@ public final class QualityRuntime {
         }
     }
 
+    public static void writePackDefinition(QualityPackDefinition definition) throws IOException {
+        PROFILE_STORE.writePackDefinition(ProfilePaths.featureGroups(), definition);
+    }
+
+    public static EffectiveQualitySelection resolveProfileDraft(QualityProfile profile) {
+        return resolveProfileDraft(profile, packDefinition());
+    }
+
+    public static EffectiveQualitySelection resolveProfileDraft(QualityProfile profile, QualityPackDefinition definition) {
+        List<QualityProfile> profiles = new ArrayList<>(PROFILE_REPOSITORY.listPresets());
+        profiles.removeIf(candidate -> candidate.id().equals(profile.id()));
+        profiles.add(profile);
+        QualitySelection selection = new QualitySelection(
+                QualitySelection.SCHEMA_VERSION,
+                profile.id(),
+                profile.featureChoices()
+        );
+        return QualitySelectionResolver.resolve(profile, profiles, definition, selection);
+    }
+
     public static QualitySelection activeQualitySelection() {
         return appliedChange()
                 .map(PendingProfileChange::selection)
@@ -152,7 +173,7 @@ public final class QualityRuntime {
     public static EffectiveQualitySelection resolveQualitySelection(QualitySelection selection) throws IOException {
         QualityProfile base = PROFILE_REPOSITORY.findPreset(selection.baseProfileId())
                 .orElseThrow(() -> new IOException("Quality preset not found: " + selection.baseProfileId()));
-        return QualitySelectionResolver.resolve(base, packDefinition(), selection);
+        return QualitySelectionResolver.resolve(base, PROFILE_REPOSITORY.listPresets(), packDefinition(), selection);
     }
 
     public static Optional<QualityProfile> findMatchingPreset(QualityProfile profile) throws IOException {
@@ -228,7 +249,11 @@ public final class QualityRuntime {
 
     public static void queueProfileChange(QualityProfile profile, String reason, String sourceWorldId) throws IOException {
         QualitySelection selection = new QualitySelection(QualitySelection.SCHEMA_VERSION, profile.id(), profile.featureChoices());
-        queueResolvedProfile(profile, selection, reason, sourceWorldId);
+        List<QualityProfile> profiles = new ArrayList<>(PROFILE_REPOSITORY.listPresets());
+        profiles.removeIf(candidate -> candidate.id().equals(profile.id()));
+        profiles.add(profile);
+        EffectiveQualitySelection effective = QualitySelectionResolver.resolve(profile, profiles, packDefinition(), selection);
+        queueResolvedProfile(effective.profile(), effective.selection(), reason, sourceWorldId);
     }
 
     private static void queueResolvedProfile(QualityProfile profile, QualitySelection selection, String reason, String sourceWorldId) throws IOException {

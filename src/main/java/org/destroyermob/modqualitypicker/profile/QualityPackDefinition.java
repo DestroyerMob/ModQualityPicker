@@ -40,6 +40,18 @@ public record QualityPackDefinition(
         return "";
     }
 
+    public QualityPackDefinition withGroup(FeatureGroup group) {
+        Map<String, FeatureGroup> updated = new LinkedHashMap<>(groups);
+        updated.put(group.id(), group);
+        return new QualityPackDefinition(SCHEMA_VERSION, updated);
+    }
+
+    public QualityPackDefinition withoutGroup(String groupId) {
+        Map<String, FeatureGroup> updated = new LinkedHashMap<>(groups);
+        updated.remove(groupId);
+        return new QualityPackDefinition(SCHEMA_VERSION, updated);
+    }
+
     private static void validate(Map<String, FeatureGroup> groups) {
         Map<String, String> modOwners = new LinkedHashMap<>();
         for (Map.Entry<String, FeatureGroup> entry : groups.entrySet()) {

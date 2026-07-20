@@ -11,11 +11,20 @@ import net.minecraft.network.chat.CommonComponents;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
+import net.neoforged.fml.ModList;
+import net.neoforged.neoforge.client.gui.IConfigScreenFactory;
 import org.destroyermob.modqualitypicker.configfile.ConfigFileManager;
 import org.destroyermob.modqualitypicker.export.ProfileExporter;
 import org.destroyermob.modqualitypicker.profile.ConfigFileOverride;
+import org.destroyermob.modqualitypicker.profile.ConfigOwnerResolver;
+import org.destroyermob.modqualitypicker.profile.ApplyRequirement;
+import org.destroyermob.modqualitypicker.profile.FeatureChoice;
+import org.destroyermob.modqualitypicker.profile.FeatureGroup;
+import org.destroyermob.modqualitypicker.profile.FeatureScope;
 import org.destroyermob.modqualitypicker.profile.ModState;
+import org.destroyermob.modqualitypicker.profile.PresetEditorModel;
 import org.destroyermob.modqualitypicker.profile.ProfileOption;
+import org.destroyermob.modqualitypicker.profile.QualityPackDefinition;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
 import org.destroyermob.modqualitypicker.runtime.ModJarCatalog;
 import org.destroyermob.modqualitypicker.runtime.ProfilePaths;
@@ -59,7 +68,15 @@ public final class QualityProfileScreen extends Screen {
 
     private enum Tab {
         PROFILES,
-        MODS
+        MODS,
+        FEATURES,
+        CONFIGS
+    }
+
+    private enum ConfigOwner {
+        PRESET,
+        MOD,
+        FEATURE
     }
 
     private enum ModVisibility {
@@ -69,6 +86,9 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private record ActionButton(Component label, Runnable action) {
+    }
+
+    private record PendingConfigEdit(String path, String beforeHash) {
     }
 
     private record ScrollbarGeometry(int barX, int trackTop, int trackHeight, int thumbHeight, int thumbY) {
@@ -87,6 +107,8 @@ public final class QualityProfileScreen extends Screen {
     private final List<String> availableMods = new ArrayList<>();
     private final List<String> filteredMods = new ArrayList<>();
     private final List<String> availableConfigs = new ArrayList<>();
+    private final List<String> filteredConfigs = new ArrayList<>();
+    private final List<FeatureGroup> features = new ArrayList<>();
     private final Map<String, String> modResolutionWarnings = new LinkedHashMap<>();
     private final Map<String, Boolean> resolvedModStates = new LinkedHashMap<>();
     private final Map<String, ModJarCatalog.ModInspection> modInspections = new LinkedHashMap<>();
@@ -99,10 +121,14 @@ public final class QualityProfileScreen extends Screen {
     private int profileScroll;
     private int modScroll;
     private int configScroll;
+    private int selectedFeatureIndex;
+    private int featureScroll;
+    private int selectedFeatureChoiceIndex;
     private int detailScroll;
     private Tab tab = Tab.MODS;
     private EditBox profileName;
     private EditBox modSearch;
+    private EditBox configSearch;
     private Button queueButton;
     private Button modEnabledButton;
     private Button modLockedButton;
@@ -113,13 +139,21 @@ public final class QualityProfileScreen extends Screen {
     private int listScrollbarGrabOffset;
     private int detailScrollbarGrabOffset;
     private String modSearchText = "";
+    private String configSearchText = "";
     private ModVisibility modVisibility = ModVisibility.ALL;
     private boolean catalogLoaded;
     private String activeProfileId = "balanced";
     private String activeProfileLabel = "Balanced";
     private QualityProfile draft = QualityProfile.empty("balanced", "Balanced");
+    private QualityPackDefinition definition = QualityPackDefinition.empty();
+    private ConfigOwner configOwner = ConfigOwner.PRESET;
+    private boolean editingFeatureChoiceMods;
+    private boolean dataLoaded;
+    private boolean dirty;
     private boolean initialSelectionPending = true;
     private boolean draftTemporary;
+    private PendingConfigEdit pendingConfigEdit;
+    private boolean captureReturnedConfigEdit;
     private Component status = CommonComponents.EMPTY;
 
     public QualityProfileScreen(Screen parent) {
@@ -140,6 +174,7 @@ public final class QualityProfileScreen extends Screen {
 
     @Override
     protected void init() {
+        boolean returnedFromConfigEditor = this.pendingConfigEdit != null;
         this.queueButton = null;
         this.modEnabledButton = null;
         this.modLockedButton = null;
@@ -147,10 +182,14 @@ public final class QualityProfileScreen extends Screen {
         this.modActionButtons.clear();
         this.draggingListScrollbar = false;
         this.draggingDetailScrollbar = false;
-        reloadData();
+        if (!this.dataLoaded) {
+            reloadData();
+            this.dataLoaded = true;
+        }
         initTopControls();
 
         if (this.tab == Tab.MODS) {
+            this.configSearch = null;
             int filterWidth = Math.min(FILTER_BUTTON_WIDTH, Math.max(54, listWidth() / 3));
             int searchWidth = Math.max(1, listWidth() - filterWidth - FILTER_BUTTON_GAP);
             this.modSearch = new EditBox(this.font, listX(), modSearchY(), searchWidth, SEARCH_HEIGHT, Component.translatable("modqualitypicker.editor.search_mods"));
@@ -166,13 +205,34 @@ public final class QualityProfileScreen extends Screen {
                     filterWidth,
                     this::cycleModVisibility
             );
+        } else if (this.tab == Tab.CONFIGS) {
+            this.modSearch = null;
+            this.configSearch = new EditBox(this.font, listX(), modSearchY(), listWidth(), SEARCH_HEIGHT, Component.translatable("modqualitypicker.editor.search_configs"));
+            this.configSearch.setHint(Component.translatable("modqualitypicker.editor.search_configs"));
+            this.configSearch.setMaxLength(120);
+            this.configSearch.setValue(this.configSearchText);
+            this.configSearch.setResponder(this::setConfigSearchText);
+            this.addRenderableWidget(this.configSearch);
         } else {
             this.modSearch = null;
+            this.configSearch = null;
         }
 
         initActionButtons();
         updateModActionButtons();
         refreshControllerListButtons();
+        if (returnedFromConfigEditor) {
+            this.captureReturnedConfigEdit = true;
+        }
+    }
+
+    @Override
+    public void tick() {
+        super.tick();
+        if (this.captureReturnedConfigEdit) {
+            this.captureReturnedConfigEdit = false;
+            captureReturnedConfigEdit();
+        }
     }
 
     private void refreshControllerListButtons() {
@@ -190,9 +250,12 @@ public final class QualityProfileScreen extends Screen {
             if (absoluteIndex >= count) {
                 break;
             }
-            Component label = this.tab == Tab.PROFILES
-                    ? Component.literal(this.profiles.get(absoluteIndex).displayName())
-                    : Component.literal(this.filteredMods.get(absoluteIndex));
+            Component label = switch (this.tab) {
+                case PROFILES -> Component.literal(this.profiles.get(absoluteIndex).displayName());
+                case MODS -> Component.literal(this.filteredMods.get(absoluteIndex));
+                case FEATURES -> Component.literal(this.features.get(absoluteIndex).displayName());
+                case CONFIGS -> Component.literal(this.filteredConfigs.get(absoluteIndex));
+            };
             ControllerFocusButton button = this.addRenderableWidget(new ControllerFocusButton(
                     listX() + 2, listTop() + visible * ROW_HEIGHT + 1,
                     listWidth() - 4, ROW_HEIGHT - 2, absoluteIndex, label,
@@ -216,11 +279,7 @@ public final class QualityProfileScreen extends Screen {
         if (direction == 0 || itemCountForTab() <= 0) return;
         int pageSize = visibleRows();
         int target = clampIndex(selectedIndexForTab() + direction * pageSize, itemCountForTab());
-        if (this.tab == Tab.PROFILES) {
-            this.profileScroll = Math.max(0, Math.min(this.profileScroll + direction * pageSize, maxScrollForTab()));
-        } else {
-            this.modScroll = Math.max(0, Math.min(this.modScroll + direction * pageSize, maxScrollForTab()));
-        }
+        setScrollForTab(scrollForTab() + direction * pageSize);
         selectRow(target);
         refreshControllerListButtons();
         this.listFocusButtons.stream()
@@ -305,7 +364,39 @@ public final class QualityProfileScreen extends Screen {
 
     @Override
     public void onClose() {
+        if (this.dirty) {
+            this.minecraft.setScreen(new ConfirmScreen(
+                    save -> {
+                        this.minecraft.setScreen(this);
+                        if (save) {
+                            saveAndClose();
+                        }
+                    },
+                    Component.translatable("modqualitypicker.editor.unsaved_title"),
+                    Component.translatable("modqualitypicker.editor.unsaved_body"),
+                    Component.translatable("modqualitypicker.editor.save_close"),
+                    CommonComponents.GUI_CANCEL
+            ));
+            return;
+        }
         this.minecraft.setScreen(this.parent);
+    }
+
+    private void saveAndClose() {
+        try {
+            String displayName = this.draftTemporary ? uniqueDisplayName(this.draft.displayName()) : this.draft.displayName();
+            String profileId = this.draftTemporary ? uniqueProfileId(displayName) : this.draft.id();
+            this.draft = QualityRuntime.withRequiredDependencies(copyProfile(profileId, displayName, this.draft.mods(), this.draft.configFiles(), this.draft.options()));
+            if (this.draftTemporary) {
+                this.draft = this.draft.withSortOrder(QualityRuntime.profiles().nextSortOrder());
+                this.draftTemporary = false;
+            }
+            persistEditorData();
+            this.dirty = false;
+            this.minecraft.setScreen(this.parent);
+        } catch (IOException exception) {
+            showError(exception);
+        }
     }
 
     private void initTopControls() {
@@ -315,18 +406,14 @@ public final class QualityProfileScreen extends Screen {
         int firstRowY = 30;
 
         if (compactTopBar()) {
-            int buttonWidth = Math.max(1, (contentWidth - gap) / 2);
+            int buttonWidth = Math.max(1, (contentWidth - gap * 2) / 3);
             addButton(Component.translatable("modqualitypicker.editor.save"), x, firstRowY, buttonWidth, this::saveDraft);
-            this.queueButton = addButton(queueButtonLabel(), x + buttonWidth + gap, firstRowY, Math.max(1, contentWidth - buttonWidth - gap), this::queueOrRestartDraft);
+            this.queueButton = addButton(queueButtonLabel(), x + buttonWidth + gap, firstRowY, buttonWidth, this::queueOrRestartDraft);
+            addButton(Component.translatable("modqualitypicker.editor.done"), x + (buttonWidth + gap) * 2, firstRowY,
+                    Math.max(1, contentWidth - (buttonWidth + gap) * 2), this::onClose);
 
-            int secondRowY = firstRowY + 24;
-            addButton(Component.translatable("modqualitypicker.editor.set_default"), x, secondRowY, buttonWidth, this::setSelectedProfileDefault);
-            addButton(Component.translatable("modqualitypicker.editor.done"), x + buttonWidth + gap, secondRowY, Math.max(1, contentWidth - buttonWidth - gap), this::onClose);
-
-            int tabY = secondRowY + 24;
-            int tabWidth = Math.max(1, (contentWidth - gap) / 2);
-            addButton(tabLabel(Tab.PROFILES), x, tabY, tabWidth, () -> switchTab(Tab.PROFILES));
-            addButton(tabLabel(Tab.MODS), x + tabWidth + gap, tabY, Math.max(1, contentWidth - tabWidth - gap), () -> switchTab(Tab.MODS));
+            int tabY = firstRowY + 24;
+            addTabButtons(x, tabY, contentWidth, gap);
             return;
         }
 
@@ -343,10 +430,18 @@ public final class QualityProfileScreen extends Screen {
         addButton(Component.translatable("modqualitypicker.editor.done"), x + contentWidth - doneWidth, firstRowY, doneWidth, this::onClose);
 
         int tabY = 56;
-        int tabWidth = Math.min(100, Math.max(1, (contentWidth - gap) / 2));
-        int tabX = x + Math.max(0, (contentWidth - tabWidth * 2 - gap) / 2);
-        addButton(tabLabel(Tab.PROFILES), tabX, tabY, tabWidth, () -> switchTab(Tab.PROFILES));
-        addButton(tabLabel(Tab.MODS), tabX + tabWidth + gap, tabY, tabWidth, () -> switchTab(Tab.MODS));
+        addTabButtons(x, tabY, contentWidth, gap);
+    }
+
+    private void addTabButtons(int x, int y, int width, int gap) {
+        Tab[] tabs = Tab.values();
+        int tabWidth = Math.max(1, (width - gap * (tabs.length - 1)) / tabs.length);
+        for (int index = 0; index < tabs.length; index++) {
+            Tab target = tabs[index];
+            int buttonX = x + index * (tabWidth + gap);
+            int buttonWidth = index == tabs.length - 1 ? Math.max(1, width - index * (tabWidth + gap)) : tabWidth;
+            addButton(tabLabel(target), buttonX, y, buttonWidth, () -> switchTopTab(target));
+        }
     }
     private EditBox newProfileNameBox(int x, int y, int width) {
         EditBox box = new EditBox(this.font, x, y, Math.max(1, width), 20, Component.translatable("modqualitypicker.editor.profile_name"));
@@ -377,12 +472,44 @@ public final class QualityProfileScreen extends Screen {
             );
         }
         if (this.tab == Tab.MODS) {
+            if (this.editingFeatureChoiceMods) {
+                return List.of(
+                        new ActionButton(modEnabledButtonLabel(), this::toggleSelectedMod),
+                        new ActionButton(modLockedButtonLabel(), this::toggleSelectedModLock),
+                        new ActionButton(Component.translatable("modqualitypicker.editor.remove_override"), this::removeSelectedModOverride),
+                        new ActionButton(Component.translatable("modqualitypicker.editor.edit_configs"), this::openSelectedModConfigs),
+                        new ActionButton(Component.translatable("modqualitypicker.editor.back_to_features"), () -> switchTab(Tab.FEATURES))
+                );
+            }
             return List.of(
                     new ActionButton(modEnabledButtonLabel(), this::toggleSelectedMod),
                     new ActionButton(modLockedButtonLabel(), this::toggleSelectedModLock),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.edit_configs"), this::openSelectedModConfigs),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.remove_override"), this::removeSelectedModOverride),
                     new ActionButton(Component.translatable("modqualitypicker.editor.disable_dependents"), () -> disableSelectedMod(ModJarCatalog.DisableStrategy.DEPENDENTS)),
                     new ActionButton(Component.translatable("modqualitypicker.editor.disable_jar"), () -> disableSelectedMod(ModJarCatalog.DisableStrategy.JAR)),
                     new ActionButton(Component.translatable("modqualitypicker.editor.disable_unused_deps"), () -> disableSelectedMod(ModJarCatalog.DisableStrategy.UNUSED_DEPENDENCIES))
+            );
+        }
+        if (this.tab == Tab.FEATURES) {
+            return List.of(
+                    new ActionButton(Component.translatable("modqualitypicker.editor.feature_default"), this::cyclePresetFeatureDefault),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.feature_choice"), this::cycleSelectedFeatureChoice),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.edit_choice_mods"), this::openFeatureChoiceMods),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.edit_configs"), this::openFeatureChoiceConfigs),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.feature_advanced"), this::openFeatureAdvanced),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.manage_features"), this::openFeatureManagement)
+            );
+        }
+        if (this.tab == Tab.CONFIGS) {
+            return List.of(
+                    new ActionButton(configOwnerLabel(), this::cycleConfigOwner),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.edit_config_values"), this::editSelectedConfigValues),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.capture_config"), this::captureSelectedConfig),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.cycle_mode"), this::cycleSelectedConfigMode),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.add_config"), this::addSelectedConfig),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.remove_config"), this::removeSelectedConfig),
+                    new ActionButton(Component.translatable("modqualitypicker.editor.apply_configs"), this::applyDraftConfigs)
             );
         }
         return List.of();
@@ -428,7 +555,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private int actionButtonColumns(int contentWidth) {
-        return contentWidth >= 300 ? 3 : contentWidth >= 180 ? 2 : 1;
+        return contentWidth >= 300 ? 4 : contentWidth >= 200 ? 3 : contentWidth >= 120 ? 2 : 1;
     }
 
     private int actionButtonRows(int count, int columns) {
@@ -453,7 +580,7 @@ public final class QualityProfileScreen extends Screen {
         int scroll = scrollForTab();
         int count = itemCountForTab();
 
-        int titleY = this.tab == Tab.MODS ? modSearchY() - 14 : y - 14;
+        int titleY = this.tab == Tab.MODS || this.tab == Tab.CONFIGS ? modSearchY() - 14 : y - 14;
         drawString(guiGraphics, listTitle(), x + 8, titleY, 0xFFFFFF);
 
         guiGraphics.enableScissor(x, y, x + rowWidth, y + visibleRows * ROW_HEIGHT);
@@ -502,6 +629,19 @@ public final class QualityProfileScreen extends Screen {
                     resolvedEnabled ? "modqualitypicker.editor.resolved_enabled" : "modqualitypicker.editor.resolved_disabled"
             ).getString();
             drawString(guiGraphics, fit(warning == null ? resolvedDescription + lock : Component.translatable("modqualitypicker.editor.mod_stays_loaded").getString(), width), x, y + 12, warning == null ? secondary : 0xE8C878);
+        } else if (this.tab == Tab.FEATURES) {
+            FeatureGroup group = this.features.get(index);
+            String choiceId = this.draft.featureChoices().getOrDefault(group.id(), group.defaultChoice());
+            String choiceName = group.findChoice(choiceId).map(FeatureChoice::displayName).orElse(choiceId);
+            drawString(guiGraphics, fit(group.displayName(), width), x, y, primary);
+            drawString(guiGraphics, fit(Component.translatable("modqualitypicker.editor.feature_row", choiceName, group.playerAdjustable()).getString(), width), x, y + 12, secondary);
+        } else if (this.tab == Tab.CONFIGS) {
+            String path = this.filteredConfigs.get(index);
+            Optional<ConfigFileOverride> config = configOverride(path);
+            drawString(guiGraphics, fit(path, width), x, y, primary);
+            drawString(guiGraphics, fit(config
+                    .map(item -> Component.translatable("modqualitypicker.editor.config_owned", configOwnerName(), item.mode()).getString())
+                    .orElseGet(() -> Component.translatable("modqualitypicker.editor.config_unowned").getString()), width), x, y + 12, config.isPresent() ? 0x8FCB92 : secondary);
         }
     }
 
@@ -706,7 +846,13 @@ public final class QualityProfileScreen extends Screen {
             }
             ModState state = modState(modId.get());
             List<Component> lines = new ArrayList<>();
+            if (this.editingFeatureChoiceMods) {
+                lines.add(Component.translatable("modqualitypicker.editor.editing_feature_choice", selectedFeatureOwnerName()));
+            } else {
+                lines.add(Component.translatable("modqualitypicker.editor.editing_profile", this.draft.displayName()));
+            }
             lines.add(Component.translatable("modqualitypicker.editor.mod_state", state.enabled(), state.locked()));
+            lines.add(Component.translatable("modqualitypicker.editor.mod_config_count", state.configFiles().size()));
             lines.add(Component.translatable(
                     "modqualitypicker.editor.mod_resolved_state",
                     Component.translatable(resolvedModEnabled(modId.get()) ? "modqualitypicker.editor.enabled" : "modqualitypicker.editor.disabled")
@@ -742,6 +888,57 @@ public final class QualityProfileScreen extends Screen {
             lines.add(Component.translatable("modqualitypicker.editor.mod_position", this.selectedModIndex + 1, this.filteredMods.size()));
             lines.add(Component.translatable("modqualitypicker.editor.mod_hint"));
             lines.add(Component.translatable("modqualitypicker.editor.queue_shift_hint"));
+            return lines;
+        }
+
+        if (this.tab == Tab.FEATURES) {
+            Optional<FeatureGroup> selected = selectedFeature();
+            if (selected.isEmpty()) {
+                return List.of(Component.translatable("modqualitypicker.editor.no_features"));
+            }
+            FeatureGroup group = selected.get();
+            FeatureChoice choice = selectedFeatureChoice().orElse(group.defaultChoiceDefinition());
+            List<Component> lines = new ArrayList<>();
+            String presetChoice = this.draft.featureChoices().getOrDefault(group.id(), group.defaultChoice());
+            lines.add(Component.translatable("modqualitypicker.editor.feature_id", group.id()));
+            lines.add(Component.translatable("modqualitypicker.editor.feature_preset_default", choiceDisplayName(group, presetChoice)));
+            lines.add(Component.translatable("modqualitypicker.editor.feature_pack_default", choiceDisplayName(group, group.defaultChoice())));
+            lines.add(Component.translatable("modqualitypicker.editor.feature_scope", group.scope()));
+            lines.add(Component.translatable("modqualitypicker.editor.feature_adjustable", group.playerAdjustable()));
+            lines.add(Component.translatable("modqualitypicker.editor.feature_selected_choice", choice == null ? "None" : choice.displayName()));
+            if (choice != null) {
+                lines.add(Component.translatable("modqualitypicker.editor.feature_requirement", choice.applyRequirement()));
+                lines.add(Component.translatable("modqualitypicker.editor.feature_experimental", choice.experimental()));
+                lines.add(Component.translatable("modqualitypicker.editor.feature_mod_count", choice.mods().size()));
+                lines.add(Component.translatable("modqualitypicker.editor.feature_config_count", choice.configFiles().size()));
+                if (!choice.description().isBlank()) {
+                    lines.add(Component.literal(choice.description()));
+                }
+            }
+            if (!group.description().isBlank()) {
+                lines.add(Component.empty());
+                lines.add(Component.literal(group.description()));
+            }
+            return lines;
+        }
+
+        if (this.tab == Tab.CONFIGS) {
+            Optional<String> selected = selectedConfig();
+            if (selected.isEmpty()) {
+                return List.of(Component.translatable("modqualitypicker.editor.no_configs"));
+            }
+            String path = selected.get();
+            Optional<ConfigFileOverride> owned = configOverride(path);
+            List<Component> lines = new ArrayList<>();
+            lines.add(Component.translatable("modqualitypicker.editor.config_owner", configOwnerName()));
+            lines.add(Component.translatable("modqualitypicker.editor.config_path", path));
+            lines.add(Component.translatable("modqualitypicker.editor.config_state", owned.map(ConfigFileOverride::mode).orElse(null)));
+            owned.ifPresent(config -> {
+                lines.add(Component.translatable("modqualitypicker.editor.config_preset_file", config.presetFile().isBlank() ? "—" : config.presetFile()));
+                lines.add(Component.translatable("modqualitypicker.editor.config_hash", config.sha256().isBlank() ? "—" : config.sha256()));
+            });
+            lines.add(Component.empty());
+            lines.add(Component.translatable("modqualitypicker.editor.config_help"));
             return lines;
         }
 
@@ -783,7 +980,12 @@ public final class QualityProfileScreen extends Screen {
     private void reloadData() {
         String currentId = this.draft.id();
         String currentMod = selectedMod().orElse("");
+        String currentConfig = selectedConfig().orElse("");
+        String currentFeature = selectedFeature().map(FeatureGroup::id).orElse("");
         this.activeProfileId = QualityRuntime.activeProfileId();
+        this.definition = QualityRuntime.packDefinition();
+        this.features.clear();
+        this.features.addAll(this.definition.orderedGroups());
         this.profiles.clear();
         this.temporaryProfileIds.clear();
         this.profiles.addAll(QualityRuntime.profiles().listPresets());
@@ -837,7 +1039,21 @@ public final class QualityProfileScreen extends Screen {
         this.availableMods.addAll(modIds);
         applyModFilter(currentMod);
 
+        this.availableConfigs.clear();
+        this.availableConfigs.addAll(ConfigFileManager.listConfigFiles(ProfilePaths.gameDirectory()));
+        applyConfigFilter(currentConfig);
+
+        this.selectedFeatureIndex = clampIndex(this.selectedFeatureIndex, this.features.size());
+        for (int index = 0; index < this.features.size(); index++) {
+            if (this.features.get(index).id().equals(currentFeature)) {
+                this.selectedFeatureIndex = index;
+                break;
+            }
+        }
+        normalizeSelectedFeatureChoice();
+
         clampScrolls();
+        this.dirty = false;
     }
 
     private void addAppliedTemporaryProfile() {
@@ -878,11 +1094,23 @@ public final class QualityProfileScreen extends Screen {
         rebuildWidgets();
     }
 
+    private void switchTopTab(Tab tab) {
+        this.editingFeatureChoiceMods = false;
+        if (tab == Tab.CONFIGS) {
+            this.configOwner = ConfigOwner.PRESET;
+        }
+        switchTab(tab);
+    }
+
     private boolean selectRow(int absoluteIndex) {
         if (absoluteIndex < 0 || absoluteIndex >= itemCountForTab()) {
             return false;
         }
         if (this.tab == Tab.PROFILES) {
+            if (this.dirty && !this.profiles.get(absoluteIndex).id().equals(this.draft.id())) {
+                this.status = Component.translatable("modqualitypicker.message.save_before_switch");
+                return true;
+            }
             this.selectedProfileIndex = absoluteIndex;
             this.draft = this.profiles.get(absoluteIndex);
             this.draftTemporary = this.temporaryProfileIds.contains(this.draft.id());
@@ -892,6 +1120,15 @@ public final class QualityProfileScreen extends Screen {
             this.selectedModIndex = absoluteIndex;
             this.detailScroll = 0;
             updateModActionButtons();
+        } else if (this.tab == Tab.FEATURES) {
+            this.selectedFeatureIndex = absoluteIndex;
+            this.selectedFeatureChoiceIndex = 0;
+            this.detailScroll = 0;
+            rebuildWidgets();
+        } else if (this.tab == Tab.CONFIGS) {
+            this.selectedConfigIndex = absoluteIndex;
+            this.detailScroll = 0;
+            rebuildWidgets();
         }
         return true;
     }
@@ -905,7 +1142,7 @@ public final class QualityProfileScreen extends Screen {
                 this.draft = this.draft.withSortOrder(QualityRuntime.profiles().nextSortOrder());
                 this.draftTemporary = false;
             }
-            QualityRuntime.profiles().writePreset(this.draft);
+            persistEditorData();
             this.status = Component.translatable("modqualitypicker.message.profile_saved", this.draft.displayName());
             reloadData();
             rebuildWidgets();
@@ -956,7 +1193,9 @@ public final class QualityProfileScreen extends Screen {
             boolean temporary = this.draftTemporary;
             this.draft = QualityRuntime.withRequiredDependencies(this.draft);
             if (!temporary) {
-                QualityRuntime.profiles().writePreset(this.draft);
+                persistEditorData();
+            } else {
+                QualityRuntime.writePackDefinition(this.definition);
             }
             QualityRuntime.queueProfileChange(this.draft, this.queueReason, this.sourceWorldId);
             this.draftTemporary = temporary;
@@ -969,6 +1208,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void captureCurrent() {
+        if (!allowProfileManagement()) return;
         String displayName = uniqueDisplayName("Captured Profile");
         String id = uniqueProfileId(displayName);
         this.draft = QualityRuntime.captureCurrentProfile(id, displayName);
@@ -976,6 +1216,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void createNewProfile() {
+        if (!allowProfileManagement()) return;
         String displayName = uniqueDisplayName("New Profile");
         String id = uniqueProfileId(displayName);
         this.draft = new QualityProfile(
@@ -994,6 +1235,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void duplicateSelectedProfile() {
+        if (!allowProfileManagement()) return;
         QualityProfile source = this.draft;
         String displayName = uniqueDisplayName(source.displayName() + " Copy");
         String id = uniqueProfileId(displayName);
@@ -1025,6 +1267,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void renameSelectedProfile() {
+        if (!allowProfileManagement()) return;
         this.minecraft.setScreen(new RenameProfileScreen(this, this.draft.displayName(), this::renameSelectedProfileTo));
     }
 
@@ -1055,6 +1298,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void setSelectedProfileDefault() {
+        if (!allowProfileManagement()) return;
         try {
             QualityProfile profile = this.draft;
             if (this.draftTemporary) {
@@ -1078,6 +1322,7 @@ public final class QualityProfileScreen extends Screen {
         }
     }
     private void confirmDeleteSelectedProfile() {
+        if (!allowProfileManagement()) return;
         if (this.profiles.size() <= 1) {
             this.status = Component.translatable("modqualitypicker.message.profile_delete_last");
             return;
@@ -1118,7 +1363,7 @@ public final class QualityProfileScreen extends Screen {
 
     private void applyDraftConfigs() {
         try {
-            ConfigFileManager.applyProfileConfigFiles(ProfilePaths.gameDirectory(), this.draft);
+            ConfigFileManager.applyProfileConfigFiles(ProfilePaths.gameDirectory(), QualityRuntime.resolveProfileDraft(this.draft, this.definition).profile());
             this.status = Component.translatable("modqualitypicker.message.configs_applied", this.draft.displayName());
         } catch (IOException exception) {
             showError(exception);
@@ -1126,6 +1371,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void exportPresets() {
+        if (!allowProfileManagement()) return;
         try {
             Path destination = ProfileExporter.exportPresets(ProfilePaths.packExportRoot());
             this.status = Component.translatable("modqualitypicker.message.exported", destination.toString());
@@ -1135,6 +1381,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void moveSelectedProfile(int direction) {
+        if (!allowProfileManagement()) return;
         int targetIndex = this.selectedProfileIndex + direction;
         if (targetIndex < 0 || targetIndex >= this.profiles.size()) {
             return;
@@ -1156,17 +1403,357 @@ public final class QualityProfileScreen extends Screen {
         }
     }
 
+    private Optional<FeatureGroup> selectedFeature() {
+        if (this.features.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(this.features.get(clampIndex(this.selectedFeatureIndex, this.features.size())));
+    }
+
+    private List<FeatureChoice> selectedFeatureChoices() {
+        return selectedFeature().map(group -> List.copyOf(group.choices().values())).orElse(List.of());
+    }
+
+    private Optional<FeatureChoice> selectedFeatureChoice() {
+        List<FeatureChoice> choices = selectedFeatureChoices();
+        if (choices.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(choices.get(clampIndex(this.selectedFeatureChoiceIndex, choices.size())));
+    }
+
+    private void normalizeSelectedFeatureChoice() {
+        this.selectedFeatureChoiceIndex = clampIndex(this.selectedFeatureChoiceIndex, selectedFeatureChoices().size());
+    }
+
+    private void refreshFeatureList() {
+        String groupId = selectedFeature().map(FeatureGroup::id).orElse("");
+        String choiceId = selectedFeatureChoice().map(FeatureChoice::id).orElse("");
+        this.features.clear();
+        this.features.addAll(this.definition.orderedGroups());
+        for (int index = 0; index < this.features.size(); index++) {
+            if (this.features.get(index).id().equals(groupId)) {
+                this.selectedFeatureIndex = index;
+                break;
+            }
+        }
+        List<FeatureChoice> choices = selectedFeatureChoices();
+        for (int index = 0; index < choices.size(); index++) {
+            if (choices.get(index).id().equals(choiceId)) {
+                this.selectedFeatureChoiceIndex = index;
+                return;
+            }
+        }
+        normalizeSelectedFeatureChoice();
+    }
+
+    private void cyclePresetFeatureDefault() {
+        selectedFeature().ifPresent(group -> {
+            List<FeatureChoice> choices = List.copyOf(group.choices().values());
+            if (choices.isEmpty()) {
+                return;
+            }
+            String current = this.draft.featureChoices().getOrDefault(group.id(), group.defaultChoice());
+            int index = 0;
+            for (int candidate = 0; candidate < choices.size(); candidate++) {
+                if (choices.get(candidate).id().equals(current)) {
+                    index = candidate;
+                    break;
+                }
+            }
+            FeatureChoice next = choices.get((index + 1) % choices.size());
+            this.draft = PresetEditorModel.withFeatureChoice(this.draft, group.id(), next.id());
+            markDirty(Component.translatable("modqualitypicker.message.feature_default", group.displayName(), next.displayName()));
+            rebuildWidgets();
+        });
+    }
+
+    private void cycleSelectedFeatureChoice() {
+        List<FeatureChoice> choices = selectedFeatureChoices();
+        if (choices.isEmpty()) {
+            return;
+        }
+        this.selectedFeatureChoiceIndex = (this.selectedFeatureChoiceIndex + 1) % choices.size();
+        this.detailScroll = 0;
+        rebuildWidgets();
+    }
+
+    private void toggleFeatureAdjustable() {
+        selectedFeature().ifPresent(group -> updateFeatureGroup(group.withPlayerAdjustable(!group.playerAdjustable()),
+                Component.translatable("modqualitypicker.message.feature_updated", group.displayName())));
+    }
+
+    private void cycleFeatureScope() {
+        selectedFeature().ifPresent(group -> {
+            FeatureScope[] values = FeatureScope.values();
+            FeatureScope next = values[(group.scope().ordinal() + 1) % values.length];
+            updateFeatureGroup(group.withScope(next), Component.translatable("modqualitypicker.message.feature_updated", group.displayName()));
+        });
+    }
+
+    private void cycleFeatureRequirement() {
+        Optional<FeatureGroup> group = selectedFeature();
+        Optional<FeatureChoice> choice = selectedFeatureChoice();
+        if (group.isEmpty() || choice.isEmpty()) {
+            return;
+        }
+        ApplyRequirement[] values = ApplyRequirement.values();
+        ApplyRequirement next = values[(choice.get().applyRequirement().ordinal() + 1) % values.length];
+        updateFeatureChoice(group.get(), choice.get().withApplyRequirement(next));
+    }
+
+    private void toggleFeatureExperimental() {
+        Optional<FeatureGroup> group = selectedFeature();
+        Optional<FeatureChoice> choice = selectedFeatureChoice();
+        if (group.isPresent() && choice.isPresent()) {
+            updateFeatureChoice(group.get(), choice.get().withExperimental(!choice.get().experimental()));
+        }
+    }
+
+    private void openFeatureAdvanced() {
+        Optional<FeatureGroup> group = selectedFeature();
+        Optional<FeatureChoice> choice = selectedFeatureChoice();
+        if (group.isEmpty() || choice.isEmpty()) {
+            return;
+        }
+        this.minecraft.setScreen(new FeatureAdvancedScreen(this, group.get(), choice.get(), (updatedGroup, updatedChoice) -> {
+            Map<String, FeatureChoice> choices = new LinkedHashMap<>(updatedGroup.choices());
+            choices.put(updatedChoice.id(), updatedChoice);
+            this.definition = this.definition.withGroup(updatedGroup.withChoices(choices));
+            refreshFeatureList();
+            markDirty(Component.translatable("modqualitypicker.message.feature_updated", updatedGroup.displayName()));
+        }));
+    }
+
+    private void openFeatureManagement() {
+        this.minecraft.setScreen(new FeatureManagementScreen(this, List.of(
+                new FeatureManagementScreen.Action(Component.translatable("modqualitypicker.editor.new_feature"), this::createFeature),
+                new FeatureManagementScreen.Action(Component.translatable("modqualitypicker.editor.add_choice"), this::addFeatureChoice),
+                new FeatureManagementScreen.Action(Component.translatable("modqualitypicker.editor.rename_feature"), this::renameFeature),
+                new FeatureManagementScreen.Action(Component.translatable("modqualitypicker.editor.rename_choice"), this::renameFeatureChoice),
+                new FeatureManagementScreen.Action(Component.translatable("modqualitypicker.editor.delete_choice"), this::deleteFeatureChoice),
+                new FeatureManagementScreen.Action(Component.translatable("modqualitypicker.editor.delete_feature"), this::deleteFeature)
+        )));
+    }
+
+    private void createFeature() {
+        String id = uniqueFeatureId("feature");
+        Map<String, FeatureChoice> choices = new LinkedHashMap<>();
+        choices.put("off", new FeatureChoice("off", "Off", "", Map.of(), List.of(), ApplyRequirement.RESTART, false));
+        choices.put("on", new FeatureChoice("on", "On", "", Map.of(), List.of(), ApplyRequirement.RESTART, false));
+        int sortOrder = this.features.stream().mapToInt(FeatureGroup::sortOrder).max().orElse(0) + 10;
+        FeatureGroup group = new FeatureGroup(id, "New Feature", "", sortOrder, FeatureScope.INSTANCE, true, "off", choices);
+        this.definition = this.definition.withGroup(group);
+        refreshFeatureList();
+        this.selectedFeatureIndex = this.features.indexOf(this.definition.groups().get(id));
+        this.selectedFeatureChoiceIndex = 0;
+        markDirty(Component.translatable("modqualitypicker.message.feature_created", group.displayName()));
+        rebuildWidgets();
+    }
+
+    private void addFeatureChoice() {
+        selectedFeature().ifPresent(group -> {
+            String id = uniqueChoiceId(group, "choice");
+            Map<String, FeatureChoice> choices = new LinkedHashMap<>(group.choices());
+            choices.put(id, new FeatureChoice(id, "New Choice", "", Map.of(), List.of(), ApplyRequirement.RESTART, false));
+            this.definition = this.definition.withGroup(group.withChoices(choices));
+            refreshFeatureList();
+            this.selectedFeatureChoiceIndex = selectedFeatureChoices().size() - 1;
+            markDirty(Component.translatable("modqualitypicker.message.choice_created", group.displayName()));
+            rebuildWidgets();
+        });
+    }
+
+    private void renameFeature() {
+        selectedFeature().ifPresent(group -> this.minecraft.setScreen(new RenameProfileScreen(
+                this,
+                Component.translatable("modqualitypicker.editor.rename_feature"),
+                Component.translatable("modqualitypicker.editor.feature_name"),
+                group.displayName(),
+                name -> updateFeatureGroup(group.withDisplayName(name), Component.translatable("modqualitypicker.message.feature_updated", name))
+        )));
+    }
+
+    private void renameFeatureChoice() {
+        Optional<FeatureGroup> group = selectedFeature();
+        Optional<FeatureChoice> choice = selectedFeatureChoice();
+        if (group.isPresent() && choice.isPresent()) {
+            this.minecraft.setScreen(new RenameProfileScreen(
+                    this,
+                    Component.translatable("modqualitypicker.editor.rename_choice"),
+                    Component.translatable("modqualitypicker.editor.choice_name"),
+                    choice.get().displayName(),
+                    name -> updateFeatureChoice(group.get(), choice.get().withDisplayName(name))
+            ));
+        }
+    }
+
+    private void deleteFeatureChoice() {
+        Optional<FeatureGroup> group = selectedFeature();
+        Optional<FeatureChoice> choice = selectedFeatureChoice();
+        if (group.isEmpty() || choice.isEmpty()) {
+            return;
+        }
+        if (group.get().choices().size() <= 1) {
+            this.status = Component.translatable("modqualitypicker.message.keep_one_choice");
+            return;
+        }
+        this.minecraft.setScreen(new ConfirmScreen(
+                confirmed -> {
+                    this.minecraft.setScreen(this);
+                    if (confirmed) {
+                        performDeleteFeatureChoice(group.get(), choice.get());
+                    }
+                },
+                Component.translatable("modqualitypicker.editor.delete_choice"),
+                Component.translatable("modqualitypicker.editor.delete_choice_confirm", choice.get().displayName(), group.get().displayName()),
+                Component.translatable("modqualitypicker.editor.delete_choice"),
+                CommonComponents.GUI_CANCEL
+        ));
+    }
+
+    private void performDeleteFeatureChoice(FeatureGroup group, FeatureChoice choice) {
+        Map<String, FeatureChoice> choices = new LinkedHashMap<>(group.choices());
+        choices.remove(choice.id());
+        FeatureGroup updated = group.withChoices(choices);
+        this.definition = this.definition.withGroup(updated);
+        replaceFeatureChoiceAcrossProfiles(group.id(), choice.id(), updated.defaultChoice());
+        refreshFeatureList();
+        markDirty(Component.translatable("modqualitypicker.message.choice_deleted", choice.displayName()));
+        rebuildWidgets();
+    }
+
+    private void deleteFeature() {
+        selectedFeature().ifPresent(group -> {
+            this.minecraft.setScreen(new ConfirmScreen(
+                    confirmed -> {
+                        this.minecraft.setScreen(this);
+                        if (confirmed) {
+                            this.definition = this.definition.withoutGroup(group.id());
+                            removeFeatureAcrossProfiles(group.id());
+                            refreshFeatureList();
+                            markDirty(Component.translatable("modqualitypicker.message.feature_deleted", group.displayName()));
+                            rebuildWidgets();
+                        }
+                    },
+                    Component.translatable("modqualitypicker.editor.delete_feature"),
+                    Component.translatable("modqualitypicker.editor.delete_feature_confirm", group.displayName()),
+                    Component.translatable("modqualitypicker.editor.delete_feature"),
+                    CommonComponents.GUI_CANCEL
+            ));
+        });
+    }
+
+    private void updateFeatureGroup(FeatureGroup group, Component message) {
+        this.definition = this.definition.withGroup(group);
+        refreshFeatureList();
+        markDirty(message);
+        rebuildWidgets();
+    }
+
+    private void updateFeatureChoice(FeatureGroup group, FeatureChoice choice) {
+        Map<String, FeatureChoice> choices = new LinkedHashMap<>(group.choices());
+        choices.put(choice.id(), choice);
+        updateFeatureGroup(group.withChoices(choices), Component.translatable("modqualitypicker.message.choice_updated", choice.displayName()));
+    }
+
+    private void replaceFeatureChoiceAcrossProfiles(String groupId, String removedChoiceId, String replacementChoiceId) {
+        for (int index = 0; index < this.profiles.size(); index++) {
+            QualityProfile profile = this.profiles.get(index);
+            if (profile.featureChoices().get(groupId) != null && profile.featureChoices().get(groupId).equals(removedChoiceId)) {
+                QualityProfile updated = PresetEditorModel.withFeatureChoice(profile, groupId, replacementChoiceId);
+                this.profiles.set(index, updated);
+                if (profile.id().equals(this.draft.id())) {
+                    this.draft = updated;
+                }
+            }
+        }
+    }
+
+    private void removeFeatureAcrossProfiles(String groupId) {
+        for (int index = 0; index < this.profiles.size(); index++) {
+            QualityProfile profile = this.profiles.get(index);
+            if (profile.featureChoices().containsKey(groupId)) {
+                QualityProfile updated = PresetEditorModel.withoutFeatureChoice(profile, groupId);
+                this.profiles.set(index, updated);
+                if (profile.id().equals(this.draft.id())) {
+                    this.draft = updated;
+                }
+            }
+        }
+    }
+
+    private void persistEditorData() throws IOException {
+        boolean replaced = false;
+        for (int index = 0; index < this.profiles.size(); index++) {
+            if (this.profiles.get(index).id().equals(this.draft.id())) {
+                this.profiles.set(index, this.draft);
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            this.profiles.add(this.draft);
+        }
+        for (QualityProfile profile : this.profiles) {
+            if (!this.temporaryProfileIds.contains(profile.id())) {
+                QualityRuntime.profiles().writePreset(profile);
+            }
+        }
+        QualityRuntime.writePackDefinition(this.definition);
+    }
+
+    private void openFeatureChoiceMods() {
+        if (selectedFeatureChoice().isEmpty()) {
+            return;
+        }
+        this.editingFeatureChoiceMods = true;
+        this.tab = Tab.MODS;
+        this.modVisibility = ModVisibility.ALL;
+        applyModFilter(selectedMod().orElse(""));
+        rebuildWidgets();
+    }
+
+    private void openFeatureChoiceConfigs() {
+        if (selectedFeatureChoice().isEmpty()) {
+            return;
+        }
+        this.configOwner = ConfigOwner.FEATURE;
+        this.tab = Tab.CONFIGS;
+        rebuildWidgets();
+    }
+
+    private String uniqueFeatureId(String base) {
+        String normalized = QualityProfile.empty(base, base).id();
+        String id = normalized;
+        int suffix = 2;
+        while (this.definition.groups().containsKey(id)) {
+            id = normalized + "_" + suffix++;
+        }
+        return id;
+    }
+
+    private String uniqueChoiceId(FeatureGroup group, String base) {
+        String normalized = QualityProfile.empty(base, base).id();
+        String id = normalized;
+        int suffix = 2;
+        while (group.choices().containsKey(id)) {
+            id = normalized + "_" + suffix++;
+        }
+        return id;
+    }
+
     private void toggleSelectedMod() {
         selectedMod().ifPresent(modId -> {
             ModState current = modState(modId);
-            putModState(modId, new ModState(!current.enabled(), current.locked(), current.reason()));
+            putModState(modId, new ModState(!current.enabled(), current.locked(), current.reason(), current.configFiles()));
         });
     }
 
     private void toggleSelectedModLock() {
         selectedMod().ifPresent(modId -> {
             ModState current = modState(modId);
-            putModState(modId, new ModState(current.enabled(), !current.locked(), current.reason()));
+            putModState(modId, new ModState(current.enabled(), !current.locked(), current.reason(), current.configFiles()));
         });
     }
 
@@ -1209,10 +1796,10 @@ public final class QualityProfileScreen extends Screen {
         Map<String, ModState> mods = new LinkedHashMap<>(this.draft.mods());
         for (ModJarCatalog.DisableEntry entry : plan.entries()) {
             ModState current = mods.getOrDefault(entry.modId(), ModState.implicitChoice());
-            mods.put(entry.modId(), new ModState(false, current.locked(), entry.reason()));
+            mods.put(entry.modId(), new ModState(false, current.locked(), entry.reason(), current.configFiles()));
         }
         this.draft = copyProfile(this.draft.id(), this.draft.displayName(), mods, this.draft.configFiles(), this.draft.options());
-        this.status = Component.translatable("modqualitypicker.message.mods_disabled", plan.entries().size(), plan.rootModId());
+        markDirty(Component.translatable("modqualitypicker.message.mods_disabled", plan.entries().size(), plan.rootModId()));
         refreshModResolutionWarnings();
         this.detailScroll = 0;
         updateModActionButtons();
@@ -1228,10 +1815,18 @@ public final class QualityProfileScreen extends Screen {
 
     private void removeSelectedModOverride() {
         selectedMod().ifPresent(modId -> {
+            if (this.editingFeatureChoiceMods) {
+                selectedFeature().ifPresent(group -> selectedFeatureChoice().ifPresent(choice -> {
+                    this.definition = PresetEditorModel.removeFeatureModState(this.definition, group.id(), choice.id(), modId);
+                    refreshFeatureList();
+                    markDirty(Component.translatable("modqualitypicker.message.mod_removed", modId));
+                }));
+                return;
+            }
             Map<String, ModState> mods = new LinkedHashMap<>(this.draft.mods());
             mods.remove(modId);
             this.draft = copyProfile(this.draft.id(), this.draft.displayName(), mods, this.draft.configFiles(), this.draft.options());
-            this.status = Component.translatable("modqualitypicker.message.mod_removed", modId);
+            markDirty(Component.translatable("modqualitypicker.message.mod_removed", modId));
             refreshModResolutionWarnings();
             this.detailScroll = 0;
         });
@@ -1239,9 +1834,10 @@ public final class QualityProfileScreen extends Screen {
 
     private void addSelectedConfig() {
         selectedConfig().ifPresent(config -> {
-            ConfigFileOverride existing = configOverride(config).orElse(new ConfigFileOverride(config, defaultMode(config), "", ""));
+            ConfigFileOverride existing = configOverride(config).orElse(new ConfigFileOverride(config, ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER, "", ""));
             putConfig(existing);
-            this.status = Component.translatable("modqualitypicker.message.config_added", config);
+            markDirty(Component.translatable("modqualitypicker.message.config_added", config));
+            rebuildWidgets();
         });
     }
 
@@ -1251,32 +1847,133 @@ public final class QualityProfileScreen extends Screen {
             ConfigFileOverride.ConfigApplyMode next = switch (existing.mode()) {
                 case APPLY_DIFF -> ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER;
                 case KEEP_PLAYER -> ConfigFileOverride.ConfigApplyMode.REPLACE_FILE;
-                case REPLACE_FILE -> ConfigFileOverride.ConfigApplyMode.MERGE_TOML;
+                case REPLACE_FILE -> config.toLowerCase(Locale.ROOT).endsWith(".toml")
+                        ? ConfigFileOverride.ConfigApplyMode.MERGE_TOML
+                        : ConfigFileOverride.ConfigApplyMode.APPLY_DIFF;
                 case MERGE_TOML -> ConfigFileOverride.ConfigApplyMode.APPLY_DIFF;
             };
-            putConfig(new ConfigFileOverride(config, next, existing.presetFile(), existing.sha256()));
-        });
-    }
-
-    private void captureSelectedConfig() {
-        selectedConfig().ifPresent(config -> {
             try {
-                ConfigFileOverride existing = configOverride(config).orElse(new ConfigFileOverride(config, defaultMode(config), "", ""));
-                ConfigFileOverride captured = ConfigFileManager.captureConfigFile(ProfilePaths.gameDirectory(), this.draft, config, existing.mode());
-                putConfig(captured);
-                this.status = Component.translatable("modqualitypicker.message.config_captured", config);
+                ConfigFileOverride updated = next == ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER
+                        ? new ConfigFileOverride(config, next, "", existing.sha256())
+                        : ConfigFileManager.captureConfigFile(ProfilePaths.gameDirectory(), configOwnerRoot(), config, next);
+                putConfig(updated);
+                markDirty(Component.translatable("modqualitypicker.message.config_mode", config, next));
+                rebuildWidgets();
             } catch (IOException exception) {
                 showError(exception);
             }
         });
     }
 
+    private void captureSelectedConfig() {
+        selectedConfig().ifPresent(config -> {
+            captureConfig(config, Component.translatable("modqualitypicker.message.config_captured", config));
+        });
+    }
+
+    private void editSelectedConfigValues() {
+        Optional<String> selected = selectedConfig();
+        if (selected.isEmpty()) {
+            return;
+        }
+        String configPath = selected.get();
+        String modId = configEditorModId(configPath);
+        if (modId.isBlank()) {
+            this.status = Component.translatable("modqualitypicker.message.config_editor_owner_unknown", configPath);
+            return;
+        }
+
+        try {
+            Optional<Screen> editor = ModList.get().getModContainerById(modId).flatMap(container ->
+                    container.getCustomExtension(IConfigScreenFactory.class)
+                            .map(factory -> factory.createScreen(container, this))
+            );
+            if (editor.isEmpty()) {
+                this.status = Component.translatable("modqualitypicker.message.config_editor_unavailable", modId);
+                return;
+            }
+            this.pendingConfigEdit = new PendingConfigEdit(configPath, currentConfigHash(configPath));
+            this.captureReturnedConfigEdit = false;
+            this.minecraft.setScreen(editor.get());
+        } catch (RuntimeException exception) {
+            this.status = Component.translatable("modqualitypicker.message.config_editor_failed", modId,
+                    exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage());
+        }
+    }
+
+    private String configEditorModId(String configPath) {
+        if (this.configOwner == ConfigOwner.MOD) {
+            return selectedMod().filter(this::loadedMod).orElse("");
+        }
+        if (this.configOwner == ConfigOwner.FEATURE) {
+            List<String> choiceMods = selectedFeatureChoice().stream()
+                    .flatMap(choice -> choice.mods().keySet().stream())
+                    .filter(this::loadedMod)
+                    .toList();
+            String inferredChoiceMod = ConfigOwnerResolver.inferModId(configPath, choiceMods);
+            if (!inferredChoiceMod.isBlank()) {
+                return inferredChoiceMod;
+            }
+        }
+        List<String> loadedIds = ModList.get().getMods().stream().map(info -> info.getModId()).toList();
+        return ConfigOwnerResolver.inferModId(configPath, loadedIds);
+    }
+
+    private boolean loadedMod(String modId) {
+        return ModList.get().getModContainerById(modId).isPresent();
+    }
+
+    private String currentConfigHash(String configPath) {
+        Path path = ConfigFileManager.resolveInside(ProfilePaths.gameDirectory(), configPath);
+        try {
+            return java.nio.file.Files.isRegularFile(path) ? ConfigFileManager.sha256(path) : "";
+        } catch (IOException exception) {
+            return "";
+        }
+    }
+
+    private void captureReturnedConfigEdit() {
+        PendingConfigEdit edit = this.pendingConfigEdit;
+        this.pendingConfigEdit = null;
+        if (edit == null) {
+            return;
+        }
+        if (edit.beforeHash().equals(currentConfigHash(edit.path()))) {
+            this.status = Component.translatable("modqualitypicker.message.config_editor_unchanged", edit.path());
+            return;
+        }
+        captureConfig(edit.path(), Component.translatable("modqualitypicker.message.config_editor_captured", edit.path()));
+    }
+
+    private void captureConfig(String configPath, Component successMessage) {
+        try {
+            ConfigFileOverride existing = configOverride(configPath)
+                    .orElse(new ConfigFileOverride(configPath, defaultMode(configPath), "", ""));
+            ConfigFileOverride.ConfigApplyMode captureMode = existing.mode() == ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER
+                    ? defaultMode(configPath)
+                    : existing.mode();
+            ConfigFileOverride captured = ConfigFileManager.captureConfigFile(
+                    ProfilePaths.gameDirectory(), configOwnerRoot(), configPath, captureMode);
+            putConfig(captured);
+            markDirty(successMessage);
+            rebuildWidgets();
+        } catch (IOException exception) {
+            showError(exception);
+        }
+    }
+
     private void removeSelectedConfig() {
         selectedConfig().ifPresent(config -> {
-            List<ConfigFileOverride> configs = new ArrayList<>(this.draft.configFiles());
-            configs.removeIf(item -> item.path().equals(config));
-            this.draft = copyProfile(this.draft.id(), this.draft.displayName(), this.draft.mods(), configs, this.draft.options());
-            this.status = Component.translatable("modqualitypicker.message.config_removed", config);
+            switch (this.configOwner) {
+                case PRESET -> this.draft = PresetEditorModel.removePresetConfig(this.draft, config);
+                case MOD -> selectedMod().ifPresent(modId -> this.draft = PresetEditorModel.removeModConfig(this.draft, modId, config));
+                case FEATURE -> selectedFeature().ifPresent(group -> selectedFeatureChoice().ifPresent(choice -> {
+                    this.definition = PresetEditorModel.removeFeatureConfig(this.definition, group.id(), choice.id(), config);
+                    refreshFeatureList();
+                }));
+            }
+            markDirty(Component.translatable("modqualitypicker.message.config_removed", config));
+            rebuildWidgets();
         });
     }
 
@@ -1288,14 +1985,19 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private Optional<String> selectedConfig() {
-        if (this.availableConfigs.isEmpty()) {
+        if (this.filteredConfigs.isEmpty()) {
             return Optional.empty();
         }
-        return Optional.of(this.availableConfigs.get(this.selectedConfigIndex));
+        return Optional.of(this.filteredConfigs.get(clampIndex(this.selectedConfigIndex, this.filteredConfigs.size())));
     }
 
     private Optional<ConfigFileOverride> configOverride(String configPath) {
-        return this.draft.configFiles().stream().filter(item -> item.path().equals(configPath)).findFirst();
+        List<ConfigFileOverride> configs = switch (this.configOwner) {
+            case PRESET -> this.draft.configFiles();
+            case MOD -> selectedMod().map(this::modState).map(ModState::configFiles).orElse(List.of());
+            case FEATURE -> selectedFeatureChoice().map(FeatureChoice::configFiles).orElse(List.of());
+        };
+        return configs.stream().filter(item -> item.path().equals(configPath)).findFirst();
     }
 
     private Optional<ModState> selectedModState() {
@@ -1303,14 +2005,36 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private ModState modState(String modId) {
+        if (this.editingFeatureChoiceMods) {
+            return selectedFeatureChoice().map(choice -> choice.mods().getOrDefault(modId, ModState.implicitChoice()))
+                    .orElseGet(ModState::implicitChoice);
+        }
         return this.draft.mods().getOrDefault(modId, ModState.implicitChoice());
     }
 
     private void putModState(String modId, ModState state) {
+        if (this.editingFeatureChoiceMods) {
+            Optional<FeatureGroup> group = selectedFeature();
+            Optional<FeatureChoice> choice = selectedFeatureChoice();
+            if (group.isEmpty() || choice.isEmpty()) {
+                return;
+            }
+            try {
+                this.definition = PresetEditorModel.putFeatureModState(this.definition, group.get().id(), choice.get().id(), modId, state);
+                refreshFeatureList();
+                markDirty(Component.translatable("modqualitypicker.message.mod_updated", modId));
+            } catch (IllegalArgumentException exception) {
+                showError(exception);
+            }
+            applyModFilter(modId);
+            this.detailScroll = 0;
+            updateModActionButtons();
+            return;
+        }
         Map<String, ModState> mods = new LinkedHashMap<>(this.draft.mods());
         mods.put(modId, state);
         this.draft = copyProfile(this.draft.id(), this.draft.displayName(), mods, this.draft.configFiles(), this.draft.options());
-        this.status = Component.translatable("modqualitypicker.message.mod_updated", modId);
+        markDirty(Component.translatable("modqualitypicker.message.mod_updated", modId));
         refreshModResolutionWarnings();
         applyModFilter(modId);
         this.detailScroll = 0;
@@ -1322,10 +2046,107 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private void putConfig(ConfigFileOverride config) {
-        List<ConfigFileOverride> configs = new ArrayList<>(this.draft.configFiles());
-        configs.removeIf(item -> item.path().equals(config.path()));
-        configs.add(config);
-        this.draft = copyProfile(this.draft.id(), this.draft.displayName(), this.draft.mods(), configs, this.draft.options());
+        switch (this.configOwner) {
+            case PRESET -> this.draft = PresetEditorModel.putPresetConfig(this.draft, config);
+            case MOD -> selectedMod().ifPresent(modId -> this.draft = PresetEditorModel.putModConfig(this.draft, modId, config));
+            case FEATURE -> selectedFeature().ifPresent(group -> selectedFeatureChoice().ifPresent(choice -> {
+                this.definition = PresetEditorModel.putFeatureConfig(this.definition, group.id(), choice.id(), config);
+                refreshFeatureList();
+            }));
+        }
+    }
+
+    private void openSelectedModConfigs() {
+        if (selectedMod().isEmpty()) {
+            return;
+        }
+        this.configOwner = this.editingFeatureChoiceMods ? ConfigOwner.FEATURE : ConfigOwner.MOD;
+        this.tab = Tab.CONFIGS;
+        rebuildWidgets();
+    }
+
+    private void cycleConfigOwner() {
+        List<ConfigOwner> available = availableConfigOwners();
+        int index = available.indexOf(this.configOwner);
+        this.configOwner = available.get((Math.max(0, index) + 1) % available.size());
+        this.detailScroll = 0;
+        rebuildWidgets();
+    }
+
+    private List<ConfigOwner> availableConfigOwners() {
+        List<ConfigOwner> owners = new ArrayList<>();
+        owners.add(ConfigOwner.PRESET);
+        if (selectedMod().isPresent() && !this.editingFeatureChoiceMods) {
+            owners.add(ConfigOwner.MOD);
+        }
+        if (selectedFeatureChoice().isPresent()) {
+            owners.add(ConfigOwner.FEATURE);
+        }
+        return List.copyOf(owners);
+    }
+
+    private Component configOwnerLabel() {
+        return Component.translatable("modqualitypicker.editor.owner_button", configOwnerName());
+    }
+
+    private String configOwnerName() {
+        return switch (this.configOwner) {
+            case PRESET -> Component.translatable("modqualitypicker.editor.owner_preset", this.draft.displayName()).getString();
+            case MOD -> selectedMod().map(modId -> Component.translatable("modqualitypicker.editor.owner_mod", modId).getString())
+                    .orElse(Component.translatable("modqualitypicker.editor.owner_unavailable").getString());
+            case FEATURE -> Component.translatable("modqualitypicker.editor.owner_feature", selectedFeatureOwnerName()).getString();
+        };
+    }
+
+    private String selectedFeatureOwnerName() {
+        Optional<FeatureGroup> group = selectedFeature();
+        Optional<FeatureChoice> choice = selectedFeatureChoice();
+        if (group.isEmpty() || choice.isEmpty()) {
+            return Component.translatable("modqualitypicker.editor.owner_unavailable").getString();
+        }
+        return group.get().displayName() + " / " + choice.get().displayName();
+    }
+
+    private String choiceDisplayName(FeatureGroup group, String choiceId) {
+        return group.findChoice(choiceId).map(FeatureChoice::displayName).orElse(choiceId);
+    }
+
+    private String configOwnerRoot() throws IOException {
+        return switch (this.configOwner) {
+            case PRESET, MOD -> "presets/" + this.draft.id();
+            case FEATURE -> {
+                FeatureGroup group = selectedFeature().orElseThrow(() -> new IOException("Select a feature group first"));
+                FeatureChoice choice = selectedFeatureChoice().orElseThrow(() -> new IOException("Select a feature choice first"));
+                yield "features/" + group.id() + "/" + choice.id();
+            }
+        };
+    }
+
+    private void setConfigSearchText(String value) {
+        String selected = selectedConfig().orElse("");
+        this.configSearchText = value == null ? "" : value;
+        applyConfigFilter(selected);
+        if (this.minecraft != null) {
+            refreshControllerListButtons();
+        }
+    }
+
+    private void applyConfigFilter(String preservePath) {
+        this.filteredConfigs.clear();
+        String query = this.configSearchText.trim().toLowerCase(Locale.ROOT);
+        for (String path : this.availableConfigs) {
+            if (query.isEmpty() || path.toLowerCase(Locale.ROOT).contains(query)) {
+                this.filteredConfigs.add(path);
+            }
+        }
+        int preserved = preservePath.isBlank() ? -1 : this.filteredConfigs.indexOf(preservePath);
+        this.selectedConfigIndex = preserved >= 0 ? preserved : clampIndex(this.selectedConfigIndex, this.filteredConfigs.size());
+        this.configScroll = Math.max(0, Math.min(this.configScroll, Math.max(0, this.filteredConfigs.size() - visibleRows())));
+    }
+
+    private void markDirty(Component message) {
+        this.dirty = true;
+        this.status = message.copy().append(Component.translatable("modqualitypicker.message.unsaved_suffix"));
     }
 
     private ConfigFileOverride.ConfigApplyMode defaultMode(String config) {
@@ -1407,6 +2228,9 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private boolean resolvedModEnabled(String modId) {
+        if (this.editingFeatureChoiceMods) {
+            return modState(modId).enabled();
+        }
         return this.resolvedModStates.getOrDefault(modId, modState(modId).enabled());
     }
 
@@ -1431,6 +2255,14 @@ public final class QualityProfileScreen extends Screen {
             suffix++;
         }
         return displayName;
+    }
+
+    private boolean allowProfileManagement() {
+        if (!this.dirty) {
+            return true;
+        }
+        this.status = Component.translatable("modqualitypicker.message.save_before_action");
+        return false;
     }
 
     private boolean profileDisplayNameExists(String displayName, String exceptId) {
@@ -1470,7 +2302,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private int listTop() {
-        return contentTop() + (this.tab == Tab.MODS ? SEARCH_HEIGHT + SEARCH_GAP : 0);
+        return contentTop() + (this.tab == Tab.MODS || this.tab == Tab.CONFIGS ? SEARCH_HEIGHT + SEARCH_GAP : 0);
     }
 
     private int listWidth() {
@@ -1543,7 +2375,7 @@ public final class QualityProfileScreen extends Screen {
     }
 
     private int contentTop() {
-        return compactTopBar() ? 116 : 96;
+        return compactTopBar() ? 92 : 96;
     }
 
     private boolean insideList(double mouseX, double mouseY) {
@@ -1558,6 +2390,8 @@ public final class QualityProfileScreen extends Screen {
         return switch (this.tab) {
             case PROFILES -> this.profiles.size();
             case MODS -> this.filteredMods.size();
+            case FEATURES -> this.features.size();
+            case CONFIGS -> this.filteredConfigs.size();
         };
     }
 
@@ -1565,6 +2399,8 @@ public final class QualityProfileScreen extends Screen {
         return switch (this.tab) {
             case PROFILES -> this.selectedProfileIndex;
             case MODS -> this.selectedModIndex;
+            case FEATURES -> this.selectedFeatureIndex;
+            case CONFIGS -> this.selectedConfigIndex;
         };
     }
 
@@ -1572,15 +2408,18 @@ public final class QualityProfileScreen extends Screen {
         return switch (this.tab) {
             case PROFILES -> this.profileScroll;
             case MODS -> this.modScroll;
+            case FEATURES -> this.featureScroll;
+            case CONFIGS -> this.configScroll;
         };
     }
 
     private void setScrollForTab(int value) {
         int clamped = Math.max(0, Math.min(value, maxScrollForTab()));
-        if (this.tab == Tab.PROFILES) {
-            this.profileScroll = clamped;
-        } else {
-            this.modScroll = clamped;
+        switch (this.tab) {
+            case PROFILES -> this.profileScroll = clamped;
+            case MODS -> this.modScroll = clamped;
+            case FEATURES -> this.featureScroll = clamped;
+            case CONFIGS -> this.configScroll = clamped;
         }
         if (this.minecraft != null) {
             refreshControllerListButtons();
@@ -1594,6 +2433,8 @@ public final class QualityProfileScreen extends Screen {
     private void clampScrolls() {
         this.profileScroll = Math.max(0, Math.min(this.profileScroll, Math.max(0, this.profiles.size() - visibleRows())));
         this.modScroll = Math.max(0, Math.min(this.modScroll, Math.max(0, this.filteredMods.size() - visibleRows())));
+        this.featureScroll = Math.max(0, Math.min(this.featureScroll, Math.max(0, this.features.size() - visibleRows())));
+        this.configScroll = Math.max(0, Math.min(this.configScroll, Math.max(0, this.filteredConfigs.size() - visibleRows())));
     }
 
     private int clampIndex(int index, int size) {
@@ -1607,6 +2448,8 @@ public final class QualityProfileScreen extends Screen {
         String key = switch (target) {
             case PROFILES -> "modqualitypicker.editor.tab_profiles";
             case MODS -> "modqualitypicker.editor.tab_mods";
+            case FEATURES -> "modqualitypicker.editor.tab_features";
+            case CONFIGS -> "modqualitypicker.editor.tab_configs";
         };
         return this.tab == target ? Component.literal("> ").append(Component.translatable(key)) : Component.translatable(key);
     }
@@ -1617,6 +2460,10 @@ public final class QualityProfileScreen extends Screen {
             case MODS -> this.modSearchText.isBlank() && this.modVisibility == ModVisibility.ALL
                     ? Component.translatable("modqualitypicker.editor.tab_mods")
                     : Component.translatable("modqualitypicker.editor.tab_mods_filtered", this.filteredMods.size(), this.availableMods.size());
+            case FEATURES -> Component.translatable("modqualitypicker.editor.tab_features");
+            case CONFIGS -> this.configSearchText.isBlank()
+                    ? Component.translatable("modqualitypicker.editor.tab_configs")
+                    : Component.translatable("modqualitypicker.editor.tab_configs_filtered", this.filteredConfigs.size(), this.availableConfigs.size());
         };
     }
 
@@ -1626,6 +2473,12 @@ public final class QualityProfileScreen extends Screen {
         }
         if (this.tab == Tab.MODS) {
             return selectedMod().map(Component::literal).orElse(Component.translatable("modqualitypicker.editor.no_mods"));
+        }
+        if (this.tab == Tab.FEATURES) {
+            return selectedFeature().map(group -> Component.literal(group.displayName())).orElse(Component.translatable("modqualitypicker.editor.no_features"));
+        }
+        if (this.tab == Tab.CONFIGS) {
+            return selectedConfig().map(Component::literal).orElse(Component.translatable("modqualitypicker.editor.no_configs"));
         }
         return CommonComponents.EMPTY;
     }

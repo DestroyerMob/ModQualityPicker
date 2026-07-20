@@ -15,6 +15,7 @@ import org.destroyermob.modqualitypicker.profile.EffectiveQualitySelection;
 import org.destroyermob.modqualitypicker.profile.ApplyRequirement;
 import org.destroyermob.modqualitypicker.profile.FeatureChoice;
 import org.destroyermob.modqualitypicker.profile.FeatureGroup;
+import org.destroyermob.modqualitypicker.profile.ModState;
 import org.destroyermob.modqualitypicker.profile.QualityPackDefinition;
 import org.destroyermob.modqualitypicker.profile.QualityProfile;
 import org.destroyermob.modqualitypicker.profile.QualitySelection;
@@ -88,6 +89,8 @@ public final class PlayerQualityScreen extends Screen {
 
         if (tab == Tab.FEATURES) {
             initFeatureControls();
+        } else if (tab == Tab.MODS) {
+            initModControls();
         }
 
         initFooterControls(left, contentWidth);
@@ -159,6 +162,38 @@ public final class PlayerQualityScreen extends Screen {
                                 : this.draft.withOverride(group.id(), choiceId);
                         rebuild();
                     }));
+        }
+    }
+
+    private void initModControls() {
+        int visible = visibleModRows();
+        int qualityWidth = modQualityWidth();
+        int qualityX = contentLeft() + contentWidth() - qualityWidth;
+        for (int visibleIndex = 0; visibleIndex < visible; visibleIndex++) {
+            int index = modScroll + visibleIndex;
+            if (index >= mods.size()) {
+                break;
+            }
+            String modId = mods.get(index);
+            List<QualityProfile> choices = modProfileChoices(modId);
+            if (choices.isEmpty()) {
+                continue;
+            }
+            QualityProfile selected = effectiveModProfile(modId, choices);
+            int y = CONTENT_TOP + 13 + visibleIndex * modRowHeight();
+            CycleButton<QualityProfile> button = CycleButton.builder((QualityProfile profile) -> modProfileLabel(modId, profile))
+                    .withValues(choices)
+                    .withInitialValue(selected)
+                    .displayOnlyValue()
+                    .withTooltip(profile -> modProfileTooltip(modId, profile))
+                    .create(qualityX, y, qualityWidth, 20, Component.literal(modId), (cycle, profile) -> {
+                        this.draft = Objects.equals(profile.id(), this.draft.baseProfileId())
+                                ? this.draft.withoutModProfileOverride(modId)
+                                : this.draft.withModProfileOverride(modId, profile.id());
+                        rebuild();
+                    });
+            button.active = choices.size() > 1;
+            addRenderableWidget(button);
         }
     }
 
@@ -289,16 +324,14 @@ public final class PlayerQualityScreen extends Screen {
         int contentWidth = contentWidth();
         int right = left + contentWidth;
         boolean compact = compactModRows();
-        int modWidth = compact ? Math.max(80, contentWidth - 132) : contentWidth * 43 / 100;
-        int stateWidth = compact ? contentWidth - modWidth - WIDGET_GAP : contentWidth * 29 / 100;
-        int stateX = left + modWidth + WIDGET_GAP;
-        int ownerX = stateX + stateWidth + WIDGET_GAP;
+        int qualityWidth = modQualityWidth();
+        int qualityX = right - qualityWidth;
+        int modWidth = Math.max(40, qualityX - left - WIDGET_GAP);
         if (compact) {
             graphics.drawString(this.font, Component.translatable("modqualitypicker.player.mod_header_compact"), left, CONTENT_TOP, 0xFFFFFF, false);
         } else {
             graphics.drawString(this.font, Component.translatable("modqualitypicker.player.mod_column"), left, CONTENT_TOP, 0xFFFFFF, false);
-            graphics.drawString(this.font, Component.translatable("modqualitypicker.player.state_column"), stateX, CONTENT_TOP, 0xFFFFFF, false);
-            graphics.drawString(this.font, Component.translatable("modqualitypicker.player.owner_column"), ownerX, CONTENT_TOP, 0xFFFFFF, false);
+            graphics.drawString(this.font, Component.translatable("modqualitypicker.player.quality_column"), qualityX, CONTENT_TOP, 0xFFFFFF, false);
         }
         int visible = visibleModRows();
         for (int visibleIndex = 0; visibleIndex < visible; visibleIndex++) {
@@ -309,24 +342,16 @@ public final class PlayerQualityScreen extends Screen {
             String modId = mods.get(index);
             boolean current = loaded.enabledMods().getOrDefault(modId, false);
             boolean desired = desiredMods.getOrDefault(modId, false);
-            String ownerId = definition.ownerOfMod(modId);
-            String owner = ownerId.isBlank() ? Component.translatable("modqualitypicker.player.base_owned").getString() : ownerLabel(ownerId);
             String statusText = current == desired
                     ? (current ? Component.translatable("modqualitypicker.player.enabled").getString() : Component.translatable("modqualitypicker.player.disabled").getString())
                     : (current ? Component.translatable("modqualitypicker.player.disable_pending").getString() : Component.translatable("modqualitypicker.player.enable_pending").getString());
             int color = current == desired ? (current ? 0x79D887 : 0x888888) : 0xFFD36A;
-            int y = CONTENT_TOP + 14 + visibleIndex * modRowHeight();
+            int y = CONTENT_TOP + 15 + visibleIndex * modRowHeight();
             if (visibleIndex % 2 == 0) {
                 graphics.fill(left - 3, y - 2, right + 3, y + modRowHeight() - 2, 0x33000000);
             }
             graphics.drawString(this.font, fit(modId, Math.max(20, modWidth - WIDGET_GAP)), left, y, color, false);
-            graphics.drawString(this.font, fit(statusText, Math.max(20, stateWidth - WIDGET_GAP)), stateX, y, color, false);
-            if (compact) {
-                String controlledBy = Component.translatable("modqualitypicker.player.controlled_by", owner).getString();
-                graphics.drawString(this.font, fit(controlledBy, contentWidth), left, y + 10, 0xA8C8FF, false);
-            } else {
-                graphics.drawString(this.font, fit(owner, Math.max(20, right - ownerX)), ownerX, y, 0xA8C8FF, false);
-            }
+            graphics.drawString(this.font, fit(statusText, Math.max(20, modWidth - WIDGET_GAP)), left, y + 11, color, false);
         }
         graphics.drawCenteredString(this.font, fit(Component.translatable("modqualitypicker.player.mod_count", mods.size()).getString(), contentWidth), this.width / 2, modSummaryY(), 0x808080);
         renderScrollbar(graphics, mods.size(), visible, modScroll, CONTENT_TOP + 12, contentBottom());
@@ -431,6 +456,37 @@ public final class PlayerQualityScreen extends Screen {
         return group.displayName() + ": " + choiceName(group, effectiveChoice(group));
     }
 
+    private List<QualityProfile> modProfileChoices(String modId) {
+        return profiles.stream().filter(profile -> profile.mods().containsKey(modId)).toList();
+    }
+
+    private QualityProfile effectiveModProfile(String modId, List<QualityProfile> choices) {
+        String profileId = draft.modProfileOverrides().getOrDefault(modId, draft.baseProfileId());
+        return choices.stream().filter(profile -> profile.id().equals(profileId)).findFirst()
+                .orElseGet(() -> choices.stream().filter(profile -> profile.id().equals(draft.baseProfileId())).findFirst().orElse(choices.getFirst()));
+    }
+
+    private Component modProfileLabel(String modId, QualityProfile profile) {
+        String suffix = draft.modProfileOverrides().containsKey(modId) ? " *" : "";
+        return Component.literal(profile.displayName() + suffix);
+    }
+
+    private Tooltip modProfileTooltip(String modId, QualityProfile profile) {
+        ModState state = profile.mods().get(modId);
+        if (state == null) {
+            return Tooltip.create(Component.literal(profile.description()));
+        }
+        String enabled = Component.translatable(state.enabled()
+                ? "modqualitypicker.player.enabled"
+                : "modqualitypicker.player.disabled").getString();
+        String configs = Component.translatable("modqualitypicker.player.mod_configs", state.configFiles().size()).getString();
+        String detail = profile.displayName() + ": " + enabled + " · " + configs;
+        if (!state.reason().isBlank()) {
+            detail += "\n\n" + state.reason();
+        }
+        return Tooltip.create(Component.literal(detail));
+    }
+
     private Component requirementName(ApplyRequirement requirement) {
         return Component.translatable(switch (requirement) {
             case LIVE -> "modqualitypicker.player.requirement.live";
@@ -532,7 +588,11 @@ public final class PlayerQualityScreen extends Screen {
     }
 
     private int modRowHeight() {
-        return compactModRows() ? 22 : 13;
+        return 26;
+    }
+
+    private int modQualityWidth() {
+        return Math.min(150, Math.max(100, contentWidth() * 2 / 5));
     }
 
     private String fit(String value, int width) {

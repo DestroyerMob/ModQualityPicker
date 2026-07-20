@@ -18,7 +18,7 @@ public record QualityProfile(
         Map<String, ProfileOption> options,
         Map<String, String> featureChoices
 ) {
-    public static final int SCHEMA_VERSION = 2;
+    public static final int SCHEMA_VERSION = 3;
 
     public QualityProfile {
         schemaVersion = schemaVersion <= 0 ? SCHEMA_VERSION : schemaVersion;

@@ -185,9 +185,22 @@ public final class ConfigFileManager {
             String relativePath,
             ConfigFileOverride.ConfigApplyMode mode
     ) throws IOException {
+        return captureConfigFile(gameDirectory, "presets/" + profile.id(), relativePath, mode);
+    }
+
+    public static ConfigFileOverride captureConfigFile(
+            Path gameDirectory,
+            String ownerRoot,
+            String relativePath,
+            ConfigFileOverride.ConfigApplyMode mode
+    ) throws IOException {
         Path source = resolveInside(gameDirectory, relativePath);
         if (!Files.isRegularFile(source)) {
             throw new IOException("Config file does not exist: " + relativePath);
+        }
+
+        if (mode == ConfigFileOverride.ConfigApplyMode.KEEP_PLAYER) {
+            return new ConfigFileOverride(relativePath, mode, "", sha256(source));
         }
 
         Path baseline = captureDefaultConfigFileIfMissing(gameDirectory, relativePath);
@@ -196,15 +209,20 @@ public final class ConfigFileManager {
         }
         updateDefaultManifest(relativePath, baseline);
 
-        String presetFile = "presets/" + profile.id() + "/" + relativePath + DIFF_EXTENSION;
+        String suffix = mode == ConfigFileOverride.ConfigApplyMode.APPLY_DIFF ? DIFF_EXTENSION : "";
+        String presetFile = ownerRoot + "/" + relativePath + suffix;
         Path destination = resolveInside(ProfilePaths.instanceRoot(), presetFile);
         Path parent = destination.getParent();
         if (parent != null) {
             Files.createDirectories(parent);
         }
-        List<String> diff = UnifiedConfigDiff.create(relativePath, Files.readAllLines(baseline), Files.readAllLines(source));
-        Files.write(destination, diff);
-        return new ConfigFileOverride(relativePath, ConfigFileOverride.ConfigApplyMode.APPLY_DIFF, presetFile, sha256(source));
+        if (mode == ConfigFileOverride.ConfigApplyMode.APPLY_DIFF) {
+            List<String> diff = UnifiedConfigDiff.create(relativePath, Files.readAllLines(baseline), Files.readAllLines(source));
+            Files.write(destination, diff);
+        } else {
+            Files.copy(source, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+        }
+        return new ConfigFileOverride(relativePath, mode, presetFile, sha256(source));
     }
 
     public static String sha256(Path path) throws IOException {

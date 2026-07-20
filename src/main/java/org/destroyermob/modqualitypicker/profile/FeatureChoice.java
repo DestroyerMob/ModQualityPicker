@@ -28,4 +28,24 @@ public record FeatureChoice(
                 : Collections.unmodifiableList(new ArrayList<>(configFiles));
         applyRequirement = applyRequirement == null ? ApplyRequirement.RESTART : applyRequirement;
     }
+
+    public FeatureChoice withDisplayName(String displayName) {
+        return new FeatureChoice(id, displayName, description, mods, configFiles, applyRequirement, experimental);
+    }
+
+    public FeatureChoice withMods(Map<String, ModState> mods) {
+        return new FeatureChoice(id, displayName, description, mods, configFiles, applyRequirement, experimental);
+    }
+
+    public FeatureChoice withConfigFiles(List<ConfigFileOverride> configFiles) {
+        return new FeatureChoice(id, displayName, description, mods, configFiles, applyRequirement, experimental);
+    }
+
+    public FeatureChoice withApplyRequirement(ApplyRequirement applyRequirement) {
+        return new FeatureChoice(id, displayName, description, mods, configFiles, applyRequirement, experimental);
+    }
+
+    public FeatureChoice withExperimental(boolean experimental) {
+        return new FeatureChoice(id, displayName, description, mods, configFiles, applyRequirement, experimental);
+    }
 }

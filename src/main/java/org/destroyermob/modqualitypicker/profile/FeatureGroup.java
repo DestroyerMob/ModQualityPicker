@@ -36,4 +36,27 @@ public record FeatureGroup(
         FeatureChoice choice = choices.get(defaultChoice);
         return choice != null ? choice : choices.values().stream().findFirst().orElse(null);
     }
+
+    public FeatureGroup withDisplayName(String displayName) {
+        return new FeatureGroup(id, displayName, description, sortOrder, scope, playerAdjustable, defaultChoice, choices);
+    }
+
+    public FeatureGroup withScope(FeatureScope scope) {
+        return new FeatureGroup(id, displayName, description, sortOrder, scope, playerAdjustable, defaultChoice, choices);
+    }
+
+    public FeatureGroup withPlayerAdjustable(boolean playerAdjustable) {
+        return new FeatureGroup(id, displayName, description, sortOrder, scope, playerAdjustable, defaultChoice, choices);
+    }
+
+    public FeatureGroup withDefaultChoice(String defaultChoice) {
+        return new FeatureGroup(id, displayName, description, sortOrder, scope, playerAdjustable, defaultChoice, choices);
+    }
+
+    public FeatureGroup withChoices(Map<String, FeatureChoice> choices) {
+        String nextDefault = choices.containsKey(defaultChoice)
+                ? defaultChoice
+                : choices.keySet().stream().findFirst().orElse(defaultChoice);
+        return new FeatureGroup(id, displayName, description, sortOrder, scope, playerAdjustable, nextDefault, choices);
+    }
 }

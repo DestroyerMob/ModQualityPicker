@@ -7,7 +7,8 @@ import java.util.Map;
 public record EffectiveQualitySelection(
         QualitySelection selection,
         QualityProfile profile,
-        Map<String, String> effectiveChoices
+        Map<String, String> effectiveChoices,
+        Map<String, String> effectiveModProfiles
 ) {
     public EffectiveQualitySelection {
         selection = selection == null ? QualitySelection.forBase("balanced") : selection;
@@ -15,5 +16,8 @@ public record EffectiveQualitySelection(
         effectiveChoices = effectiveChoices == null || effectiveChoices.isEmpty()
                 ? Map.of()
                 : Collections.unmodifiableMap(new LinkedHashMap<>(effectiveChoices));
+        effectiveModProfiles = effectiveModProfiles == null || effectiveModProfiles.isEmpty()
+                ? Map.of()
+                : Collections.unmodifiableMap(new LinkedHashMap<>(effectiveModProfiles));
     }
 }

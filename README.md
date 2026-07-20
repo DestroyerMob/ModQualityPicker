@@ -17,7 +17,7 @@ This project now contains:
 
 - A compileable NeoForge mod project.
 - Common config for the currently selected profile and mismatch policy.
-- JSON models for base presets, composable feature groups, per-player overrides, config overrides, and runtime selections.
+- JSON models for base presets, composable feature groups, per-player and per-mod preset overrides, config overrides, and runtime selections.
 - Startup snapshot writing for the currently loaded mod list.
 - Diff logic for comparing a world profile against the active launch selection.
 - A full player-facing quality screen from vanilla Options with base presets, independent feature choices, current/desired mod state, and restart requirements.
@@ -43,7 +43,7 @@ Players open the pack quality screen from:
 Options -> Pack Quality
 ```
 
-The screen starts with a base preset, then lets players override pack-defined feature groups independently. For example, a player can use the Balanced base while selecting Full Ecology, without inheriting every setting from Max. The Mods tab shows whether each resolved mod is loaded, disabled, or pending a restart, and which feature group controls it.
+The screen starts with a base preset, which controls every mod by default. The Mods tab then lets players cycle an individual mod through the presets in which the pack developer defined it; that mod inherits the selected preset's enabled state and any config overlays stored on its mod entry. Changing the base preset resets these per-mod overrides. Pack-defined feature groups remain available for choices that intentionally control several mods together, such as world generation.
 
 Open the same player screen from:
 
@@ -63,14 +63,44 @@ The detailed pack-developer editor remains available from the `Developer` button
 /modqualitypicker developer
 ```
 
-Its two visible tabs are:
+Its four authoring tabs are:
 
 - `Profiles`: switch, save, capture the current launch, queue the profile for restart, or export presets.
-- `Mods`: click a mod in the scrollable list, then toggle whether it should be enabled in the profile, mark it locked, or remove its override.
+- `Mods`: define enabled/disabled and locked state, inspect dependencies, and open configs owned by one mod in this preset.
+- `Features`: create and edit feature groups and choices, choose this preset's default, and edit each choice's mod states and configs.
+- `Configs`: search live files, choose whether the owner is the whole preset, a mod, or a feature choice, edit values through the owning mod's native config screen, then capture, change mode, remove, or preview-apply the rule.
 
-Config profiles are stored as diffs over generated defaults. The in-game config editor controls are hidden for now, but the helper can capture default baselines and regenerate preset diffs from live configs.
+Config profiles are stored over generated defaults. To author one in-game, select its owner and file under `Configs`, then press `Edit Values`. The editor opens the same config screen the mod registers with NeoForge; returning automatically captures the changed file into the preset. Mods that do not register an in-game screen still use the manual workflow: edit the live file externally, then press `Capture File`. Unsaved changes remain in memory across tabs and the editor prompts before closing them.
+
+A normal developer pass is:
+
+1. Select or create the preset under `Profiles`.
+2. Define each mod's enabled and locked state under `Mods`; open `Configs` from a mod to attach files specifically to that mod in this preset.
+3. Under `Features`, choose this preset's default for each group. Select a feature choice to edit the mods and config overlays contributed by that choice.
+4. Find a live config under `Configs`, select its owner and application mode, press `Edit Values`, and change it in the mod's native menu. Returning captures the edit automatically; use `Capture File` for mods without a native menu.
+5. Save, validate by queueing the preset, and export the complete presets/defaults/features tree into the pack.
 
 Pack developers control base-preset order with each profile's `sortOrder` field. Player-adjustable groups and their choices are defined in `config/modqualitypicker/feature-groups.json`; each choice can own mod states, config overlays, scope, and an application requirement such as restart or new world.
+
+Preset-specific config belongs on the mod entry when it should follow per-mod quality selection:
+
+```json
+"particular": {
+  "enabled": true,
+  "locked": false,
+  "reason": "High-quality particle effects.",
+  "configFiles": [
+    {
+      "path": "config/particular.json",
+      "mode": "APPLY_DIFF",
+      "presetFile": "presets/max/config/particular.json.diff",
+      "sha256": ""
+    }
+  ]
+}
+```
+
+Top-level `configFiles` remain available for preset-wide files that do not belong to one mod. Mod-owned config overlays are applied only while that mod is enabled and are replaced when the player chooses another preset for that mod.
 
 ## Building
 
@@ -171,6 +201,12 @@ After editing live configs into the desired state for a preset, regenerate that 
 
 ```sh
 python3 tools/modqualitypicker_prism.py capture-diffs --instance-root /path/to/Prism/instance --profile-id balanced
+```
+
+To make selected config files follow one mod's per-preset quality choice, attach them to that enabled mod while capturing:
+
+```sh
+python3 tools/modqualitypicker_prism.py capture-diffs --instance-root /path/to/Prism/instance --profile-id max --mod-id ecology --config config/ecology-common.toml
 ```
 
 If a world needs changes on top of the selected preset, capture only that world's extra layer:
